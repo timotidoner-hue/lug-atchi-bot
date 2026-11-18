@@ -29,8 +29,8 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("testbot")
 
 # ---------------- Sozlamalar ----------------
-TOKEN = os.environ["8383669233:AAEV3yRmGzAXi2bVgPl80qjAEMTp0Jv1W7Y"]
-DATA_DIR = os.getenv("DATA_DIR", ".")  # Railway Volume: /data
+TOKEN = os.environ["BOT_TOKEN"]
+DATA_DIR = os.getenv("DATA_DIR") or os.getenv("RAILWAY_VOLUME_MOUNT_PATH") or "."  # Railway Volume avtomatik aniqlanadi
 TZ = ZoneInfo(os.getenv("BOT_TZ", "Asia/Tashkent"))
 AUTO_HOUR = 16        # avtomatik test vaqti (soat)
 AUTO_COUNT = 10       # kunlik avtomatik testlar soni
