@@ -85,6 +85,8 @@ CREATE TABLE IF NOT EXISTS questions(
     last_ok INTEGER DEFAULT 0,
     due INTEGER DEFAULT 0,
     last_ts INTEGER DEFAULT 0,
+    rep_day TEXT,
+    rep_ok INTEGER DEFAULT 0,
     UNIQUE(user_id, h)
 );
 CREATE TABLE IF NOT EXISTS sessions(
@@ -100,6 +102,8 @@ CREATE TABLE IF NOT EXISTS sessions(
 for _sql in (
     "ALTER TABLE questions ADD COLUMN last_ts INTEGER DEFAULT 0",
     "ALTER TABLE sessions ADD COLUMN started INTEGER DEFAULT 0",
+    "ALTER TABLE questions ADD COLUMN rep_day TEXT",
+    "ALTER TABLE questions ADD COLUMN rep_ok INTEGER DEFAULT 0",
 ):
     try:  # eski bazani yangilash
         db.execute(_sql)
@@ -252,10 +256,29 @@ def parse_items(data):
     return items, errors
 
 
+def qhash(q):
+    """Savolni solishtirish kaliti: harf/raqamlar, kichik harf (bo'shliq, tinish belgisi, registr farqi hisobga olinmaydi)."""
+    t = "".join(ch for ch in norm(q).lower() if ch.isalnum())
+    return hashlib.sha1(t.encode()).hexdigest()
+
+
+def migrate_hashes():
+    """Eski savollarni yangi kalit bilan yangilaydi; takroriylari o'chiriladi."""
+    for r in db.execute("SELECT id, user_id, question, h FROM questions ORDER BY id").fetchall():
+        h = qhash(r["question"])
+        if h == r["h"]:
+            continue
+        try:
+            db.execute("UPDATE questions SET h=? WHERE id=?", (h, r["id"]))
+        except sqlite3.IntegrityError:
+            db.execute("DELETE FROM questions WHERE id=?", (r["id"],))
+    db.commit()
+
+
 def add_questions(uid, items):
     added = dup = 0
     for q, opts, correct in items:
-        h = hashlib.sha1(q.lower().encode()).hexdigest()
+        h = qhash(q)
         try:
             db.execute(
                 "INSERT INTO questions(user_id,h,question,options,correct) VALUES(?,?,?,?,?)",
@@ -438,7 +461,7 @@ async def on_document(m: Message, bot: Bot):
     except Exception as e:
         return await m.answer(f"❌ Faylni o'qib bo'lmadi: {e}")
     added, dup = add_questions(uid, items)
-    text = f"✅ Qo'shildi: {added}\n♻️ Takroriy (o'tkazib yuborildi): {dup}"
+    text = f"✅ Qo'shildi: {added}\n♻️ Avval qo'shilgan (hisobga olinmadi): {dup}"
     if errors:
         text += f"\n⚠️ Xato savollar: {len(errors)}\n" + "\n".join(errors[:5])
     await m.answer(text)
@@ -469,31 +492,43 @@ async def btn_progress(m: Message):
         "SELECT COUNT(*) t, COALESCE(SUM(last_ok),0) ok FROM questions WHERE user_id=?", (uid,)
     ).fetchone()
     total, done = r["t"], r["ok"]
-    if total == 0:
-        return await m.answer("Hali test yo'q. Avval ➕ Test qo'shish.")
-    pct = done / total * 100
+    pct = done / total * 100 if total else 0
     await m.answer_photo(
         BufferedInputFile(battery_png(pct, done, total), "progress.png"),
-        caption=f"📈 {pct:.0f}% — {done}/{total} ta test o'rganildi\n🔥 Kun seriyasi: {streak_now(uid)}",
+        caption=(
+            f"📈 {pct:.0f}% — {done}/{total} ta test o'rganildi\n🔥 Kun seriyasi: {streak_now(uid)}"
+            if total
+            else "Hali test yo'q. Avval ➕ Test qo'shish."
+        ),
     )
-    # 2-rasm: to'g'ri ishlangan, lekin 2 kundan oshib takrorlanmagan testlar
-    overdue = db.execute(
+
+    # 2-rasm: takrorlanishi kerak bo'lgan testlar (to'g'ri ishlangan, vaqti kelgan)
+    t = today()
+    pending = db.execute(
         "SELECT COUNT(*) c FROM questions WHERE user_id=? AND last_ok=1 AND due<=?",
         (uid, int(time.time())),
     ).fetchone()["c"]
-    if overdue > 0 and done > 0:
-        fresh = done - overdue
-        rp = fresh / done * 100
-        await m.answer_photo(
-            BufferedInputFile(
-                battery_png(rp, fresh, done, "Takrorlash", "ta takrorlandi"), "repeat.png"
-            ),
-            caption=(
-                f"🔁 {overdue} ta test takrorlashni kutmoqda ({REPEAT_DAYS} kundan oshdi)\n"
-                f"Takrorlangan: {rp:.0f}% — {fresh}/{done}\n"
-                f"📝 Test ishlash tugmasi bilan takrorlang."
-            ),
+    r = db.execute(
+        "SELECT COUNT(*) c, COALESCE(SUM(rep_ok),0) ok FROM questions WHERE user_id=? AND rep_day=?",
+        (uid, t),
+    ).fetchone()
+    cohort = pending + r["c"]
+    rdone = r["ok"]
+    if cohort == 0:
+        rp, caption = 100, "✅ Takrorlanishi kerak bo'lgan test yo'q, ertaga keling."
+    else:
+        rp = rdone / cohort * 100
+        caption = (
+            f"🔁 Takrorlash: {rp:.0f}% — {rdone}/{cohort} ta\n"
+            f"⏳ Hali takrorlanmagan: {pending} ta\n"
+            "📝 Test ishlash tugmasi bilan takrorlang."
         )
+    await m.answer_photo(
+        BufferedInputFile(
+            battery_png(rp, rdone, cohort, "Takrorlash", "ta takrorlandi"), "repeat.png"
+        ),
+        caption=caption,
+    )
 
 
 @router.message(F.text == BTN_WORK)
@@ -534,16 +569,24 @@ async def on_answer(cb: CallbackQuery, bot: Bot):
         pass
 
     days = REPEAT_DAYS if ok else WRONG_REPEAT_DAYS
+    now_ts = int(time.time())
+    t = today()
+    rep_day, rep_ok = q["rep_day"], q["rep_ok"]
+    if q["last_ok"] == 1 and q["due"] <= now_ts:  # takrorlanishi kerak bo'lgan test
+        rep_day, rep_ok = t, 1 if ok else 0
+    elif ok and rep_day == t:
+        rep_ok = 1
     db.execute(
-        "UPDATE questions SET attempts=attempts+1, seen=1, last_ok=?, due=?, last_ts=? WHERE id=?",
-        (1 if ok else 0, int(time.time()) + days * 86400, int(time.time()), q["id"]),
+        "UPDATE questions SET attempts=attempts+1, seen=1, last_ok=?, due=?, last_ts=?, "
+        "rep_day=?, rep_ok=? WHERE id=?",
+        (1 if ok else 0, now_ts + days * 86400, now_ts, rep_day, rep_ok, q["id"]),
     )
     db.execute(
         "UPDATE sessions SET total=total+1, ok=ok+? WHERE user_id=?", (1 if ok else 0, uid)
     )
     db.commit()
     touch_streak(uid)
-    await cb.answer("✅ To'g'ri!" if ok else "❌ Xato")
+        await cb.answer("✅ To'g'ri!" if ok else "❌ Xato")
     await send_next(bot, cb.message.chat.id, uid)
 
 
@@ -573,6 +616,7 @@ async def scheduler(bot: Bot):
 
 
 async def main():
+    migrate_hashes()
     bot = Bot(TOKEN)
     dp = Dispatcher()
     dp.include_router(router)
