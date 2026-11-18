@@ -586,7 +586,7 @@ async def on_answer(cb: CallbackQuery, bot: Bot):
     )
     db.commit()
     touch_streak(uid)
-        await cb.answer("✅ To'g'ri!" if ok else "❌ Xato")
+    await cb.answer("✅ To'g'ri!" if ok else "❌ Xato")
     await send_next(bot, cb.message.chat.id, uid)
 
 
