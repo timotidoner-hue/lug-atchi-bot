@@ -30,7 +30,11 @@ log = logging.getLogger("testbot")
 
 # ---------------- Sozlamalar ----------------
 TOKEN = os.environ["BOT_TOKEN"]
-DATA_DIR = os.getenv("DATA_DIR") or os.getenv("RAILWAY_VOLUME_MOUNT_PATH") or "."  # Railway Volume avtomatik aniqlanadi
+DATA_DIR = (
+    os.getenv("DATA_DIR")
+    or os.getenv("RAILWAY_VOLUME_MOUNT_PATH")
+    or ("/data" if os.path.isdir("/data") else ".")
+)
 TZ = ZoneInfo(os.getenv("BOT_TZ", "Asia/Tashkent"))
 AUTO_HOUR = 16        # avtomatik test vaqti (soat)
 AUTO_COUNT = 10       # kunlik avtomatik testlar soni
@@ -42,17 +46,21 @@ BTN_ADD = "➕ Test qo'shish"
 BTN_COUNT = "📊 Testlar soni"
 BTN_PROGRESS = "📈 Progress"
 BTN_WORK = "📝 Test ishlash"
+BTN_WRONG = "❌ Xatolarni ishlash"
 
 MENU = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text=BTN_WORK), KeyboardButton(text=BTN_PROGRESS)],
-        [KeyboardButton(text=BTN_ADD), KeyboardButton(text=BTN_COUNT)],
+        [KeyboardButton(text=BTN_WRONG), KeyboardButton(text=BTN_COUNT)],
+        [KeyboardButton(text=BTN_ADD)],
     ],
     resize_keyboard=True,
 )
 
 # ---------------- Baza ----------------
 os.makedirs(DATA_DIR, exist_ok=True)
+if DATA_DIR == ".":
+    log.warning("Volume ulanmagan: baza har deploydan keyin o'chib ketadi! Railway'da Volume (/data) qo'shing.")
 db = sqlite3.connect(os.path.join(DATA_DIR, "bot.db"), check_same_thread=False)
 db.row_factory = sqlite3.Row
 db.executescript(
@@ -76,6 +84,7 @@ CREATE TABLE IF NOT EXISTS questions(
     seen INTEGER DEFAULT 0,
     last_ok INTEGER DEFAULT 0,
     due INTEGER DEFAULT 0,
+    last_ts INTEGER DEFAULT 0,
     UNIQUE(user_id, h)
 );
 CREATE TABLE IF NOT EXISTS sessions(
@@ -83,10 +92,19 @@ CREATE TABLE IF NOT EXISTS sessions(
     remaining INTEGER,
     total INTEGER DEFAULT 0,
     ok INTEGER DEFAULT 0,
-    mode TEXT
+    mode TEXT,
+    started INTEGER DEFAULT 0
 );
 """
 )
+for _sql in (
+    "ALTER TABLE questions ADD COLUMN last_ts INTEGER DEFAULT 0",
+    "ALTER TABLE sessions ADD COLUMN started INTEGER DEFAULT 0",
+):
+    try:  # eski bazani yangilash
+        db.execute(_sql)
+    except sqlite3.OperationalError:
+        pass
 db.commit()
 
 
@@ -251,7 +269,20 @@ def add_questions(uid, items):
 
 
 # ---------------- Test sessiyasi ----------------
-def pick_question(uid):
+def wrong_count(uid):
+    return db.execute(
+        "SELECT COUNT(*) c FROM questions WHERE user_id=? AND seen=1 AND last_ok=0", (uid,)
+    ).fetchone()["c"]
+
+
+def pick_question(uid, mode=None, started=0):
+    if mode == "wrong":
+        # xato qilingan testlar muddatidan qat'i nazar; shu sessiyada ishlanganlari qaytmaydi
+        return db.execute(
+            "SELECT * FROM questions WHERE user_id=? AND seen=1 AND last_ok=0 AND last_ts<? "
+            "ORDER BY RANDOM() LIMIT 1",
+            (uid, started),
+        ).fetchone()
     return db.execute(
         "SELECT * FROM questions WHERE user_id=? AND due<=? ORDER BY seen ASC, RANDOM() LIMIT 1",
         (uid, int(time.time())),
@@ -292,9 +323,10 @@ async def send_next(bot, chat_id, uid):
         return
     if s["remaining"] <= 0:
         return await finish_session(bot, chat_id, uid)
-    q = pick_question(uid)
+    q = pick_question(uid, s["mode"], s["started"])
     if not q:
-        return await finish_session(bot, chat_id, uid, "Hozircha takrorlanadigan test qolmadi 🎉")
+        note = "Xato testlar qolmadi 🎉" if s["mode"] == "wrong" else "Hozircha takrorlanadigan test qolmadi 🎉"
+        return await finish_session(bot, chat_id, uid, note)
     await send_question(bot, chat_id, q)
     db.execute("UPDATE sessions SET remaining=remaining-1 WHERE user_id=?", (uid,))
     db.commit()
@@ -304,23 +336,30 @@ async def send_next(bot, chat_id, uid):
 
 async def start_session(bot, chat_id, uid, mode):
     ensure_user(uid)
-    if mode == "manual":
+    started = int(time.time())
+    if mode == "wrong":
+        n = wrong_count(uid)
+        if n == 0:
+            return await bot.send_message(chat_id, "Xato qilingan test yo'q 🎉")
+    elif mode == "manual":
         n = DAILY_LIMIT - day_count(uid)
         if n <= 0:
             return await bot.send_message(chat_id, f"Bugungi {DAILY_LIMIT} ta limit tugadi. Ertaga davom etamiz 💪")
     else:
         n = AUTO_COUNT
-    if not pick_question(uid):
+    if not pick_question(uid, mode, started):
         if mode == "manual":
             total = db.execute("SELECT COUNT(*) c FROM questions WHERE user_id=?", (uid,)).fetchone()["c"]
             msg = "Avval test qo'shing: ➕ Test qo'shish." if total == 0 else "Hozircha takrorlanadigan test yo'q. Keyinroq urinib ko'ring."
             await bot.send_message(chat_id, msg)
         return
     db.execute(
-        "INSERT OR REPLACE INTO sessions(user_id,remaining,total,ok,mode) VALUES(?,?,0,0,?)",
-        (uid, n, mode),
+        "INSERT OR REPLACE INTO sessions(user_id,remaining,total,ok,mode,started) VALUES(?,?,0,0,?,?)",
+        (uid, n, mode, started),
     )
     db.commit()
+    if mode == "wrong":
+        await bot.send_message(chat_id, f"❌ Xato qilingan {n} ta test boshlandi!")
     if mode == "auto":
         await bot.send_message(chat_id, f"⏰ Kunlik {AUTO_COUNT} ta test boshlandi!")
     await send_next(bot, chat_id, uid)
@@ -416,6 +455,7 @@ async def btn_count(m: Message):
     await m.answer(
         f"📊 Jami testlar: {total}\n"
         f"🔁 Hozir ishlash mumkin: {due}\n"
+        f"❌ Xato qilingan: {wrong_count(uid)}\n"
         f"📅 Bugun ishlangan (tugma orqali): {day_count(uid)}/{DAILY_LIMIT}\n"
         f"🔥 Kun seriyasi: {streak_now(uid)}"
     )
@@ -441,6 +481,11 @@ async def btn_progress(m: Message):
 @router.message(F.text == BTN_WORK)
 async def btn_work(m: Message, bot: Bot):
     await start_session(bot, m.chat.id, m.from_user.id, "manual")
+
+
+@router.message(F.text == BTN_WRONG)
+async def btn_wrong(m: Message, bot: Bot):
+    await start_session(bot, m.chat.id, m.from_user.id, "wrong")
 
 
 @router.callback_query(F.data == "n")
@@ -472,8 +517,8 @@ async def on_answer(cb: CallbackQuery, bot: Bot):
 
     days = REPEAT_DAYS if ok else WRONG_REPEAT_DAYS
     db.execute(
-        "UPDATE questions SET attempts=attempts+1, seen=1, last_ok=?, due=? WHERE id=?",
-        (1 if ok else 0, int(time.time()) + days * 86400, q["id"]),
+        "UPDATE questions SET attempts=attempts+1, seen=1, last_ok=?, due=?, last_ts=? WHERE id=?",
+        (1 if ok else 0, int(time.time()) + days * 86400, int(time.time()), q["id"]),
     )
     db.execute(
         "UPDATE sessions SET total=total+1, ok=ok+? WHERE user_id=?", (1 if ok else 0, uid)
