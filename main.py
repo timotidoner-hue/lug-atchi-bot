@@ -375,12 +375,12 @@ def font(size):
     return ImageFont.load_default(size=size)
 
 
-def battery_png(pct, done, total):
+def battery_png(pct, done, total, title="Progress", label="ta o'rganildi"):
     col = (220, 53, 69) if pct < 34 else (255, 159, 28) if pct < 67 else (40, 180, 99)
     dark = (40, 44, 52)
     img = Image.new("RGB", (1000, 640), (245, 247, 250))
     d = ImageDraw.Draw(img)
-    d.text((500, 60), "Progress", font=font(52), fill=dark, anchor="mm")
+    d.text((500, 60), title, font=font(52), fill=dark, anchor="mm")
     d.rounded_rectangle((100, 130, 820, 380), radius=40, outline=dark, width=12)
     d.rounded_rectangle((832, 200, 884, 310), radius=14, fill=dark)
     x0, x1, y0, y1 = 130, 790, 160, 350
@@ -388,7 +388,7 @@ def battery_png(pct, done, total):
     if fw > 0:
         d.rounded_rectangle((x0, y0, x0 + max(fw, 24), y1), radius=20, fill=col)
     d.text((500, 480), f"{pct:.0f}%", font=font(120), fill=col, anchor="mm")
-    d.text((500, 580), f"{done} / {total} ta o'rganildi", font=font(44), fill=(100, 106, 118), anchor="mm")
+    d.text((500, 580), f"{done} / {total} {label}", font=font(44), fill=(100, 106, 118), anchor="mm")
     buf = io.BytesIO()
     img.save(buf, "PNG")
     return buf.getvalue()
@@ -476,6 +476,24 @@ async def btn_progress(m: Message):
         BufferedInputFile(battery_png(pct, done, total), "progress.png"),
         caption=f"📈 {pct:.0f}% — {done}/{total} ta test o'rganildi\n🔥 Kun seriyasi: {streak_now(uid)}",
     )
+    # 2-rasm: to'g'ri ishlangan, lekin 2 kundan oshib takrorlanmagan testlar
+    overdue = db.execute(
+        "SELECT COUNT(*) c FROM questions WHERE user_id=? AND last_ok=1 AND due<=?",
+        (uid, int(time.time())),
+    ).fetchone()["c"]
+    if overdue > 0 and done > 0:
+        fresh = done - overdue
+        rp = fresh / done * 100
+        await m.answer_photo(
+            BufferedInputFile(
+                battery_png(rp, fresh, done, "Takrorlash", "ta takrorlandi"), "repeat.png"
+            ),
+            caption=(
+                f"🔁 {overdue} ta test takrorlashni kutmoqda ({REPEAT_DAYS} kundan oshdi)\n"
+                f"Takrorlangan: {rp:.0f}% — {fresh}/{done}\n"
+                f"📝 Test ishlash tugmasi bilan takrorlang."
+            ),
+        )
 
 
 @router.message(F.text == BTN_WORK)
