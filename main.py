@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
@@ -30,7 +31,7 @@ log = logging.getLogger("leitner_bot")
 
 # ---------------- Sozlamalar ----------------
 TOKEN = os.environ["BOT_TOKEN"]
-WEBAPP_URL = os.getenv("WEBAPP_URL", "").rstrip("/")  # Masalan: https://sizning-app.up.railway.app
+WEBAPP_URL = os.getenv("WEBAPP_URL", "").rstrip("/")
 PORT = int(os.getenv("PORT", 8080))
 DATA_DIR = (
     os.getenv("DATA_DIR")
@@ -43,7 +44,6 @@ AUTO_COUNT = 10
 DAILY_LIMIT = 50
 
 # Ebbinghaus + Leitner intervallari (soniyalarda)
-# Box 0: 10 daqiqa, Box 1: 1 kun, Box 2: 3 kun, Box 3: 7 kun, Box 4: 16 kun, Box 5: 35 kun
 LEITNER_INTERVALS = {
     0: 600,
     1: 86400,
@@ -55,6 +55,8 @@ LEITNER_INTERVALS = {
 
 # ---------------- Baza (WAL rejimi bilan) ----------------
 os.makedirs(DATA_DIR, exist_ok=True)
+if DATA_DIR == ".":
+    log.warning("Volume ulanmagan: baza har deploydan keyin o'chib ketadi! Railway'da Volume (/data) qo'shing.")
 db = sqlite3.connect(os.path.join(DATA_DIR, "bot.db"), check_same_thread=False)
 db.row_factory = sqlite3.Row
 db.execute("PRAGMA journal_mode=WAL;")
@@ -99,7 +101,6 @@ CREATE TABLE IF NOT EXISTS sessions(
 """
 )
 
-# Eski bazadan migratsiya qilish
 for _sql in (
     "ALTER TABLE users ADD COLUMN full_name TEXT DEFAULT ''",
     "ALTER TABLE questions ADD COLUMN box INTEGER DEFAULT 0",
@@ -294,16 +295,14 @@ def apply_leitner_answer(uid, qid, is_ok):
     if is_ok:
         new_box = min(old_box + 1, 5)
     else:
-        new_box = 0  # Ebbinghaus reset: xato qilinsa 0-qutiga qaytadi
+        new_box = 0
 
     interval = LEITNER_INTERVALS[new_box]
     next_due = now_ts + interval
 
     db.execute(
-        """UPDATE questions SET 
-           box=?, attempts=attempts+1, correct_count=correct_count+?, 
-           seen=1, last_ok=?, due=?, last_ts=? 
-           WHERE id=?""",
+        "UPDATE questions SET box=?, attempts=attempts+1, correct_count=correct_count+?, "
+        "seen=1, last_ok=?, due=?, last_ts=? WHERE id=?",
         (new_box, 1 if is_ok else 0, 1 if is_ok else 0, next_due, now_ts, qid),
     )
     db.commit()
@@ -317,19 +316,16 @@ def pick_question(uid, mode="due", exclude_ids=None):
     now_ts = int(time.time())
 
     if mode == "wrong":
-        query = f"""
-            SELECT * FROM questions 
-            WHERE user_id=? AND seen=1 AND last_ok=0 AND id NOT IN ({placeholders})
-            ORDER BY last_ts ASC, RANDOM() LIMIT 1
-        """
+        query = (
+            f"SELECT * FROM questions WHERE user_id=? AND seen=1 AND last_ok=0 "
+            f"AND id NOT IN ({placeholders}) ORDER BY last_ts ASC, RANDOM() LIMIT 1"
+        )
         return db.execute(query, (uid, *exclude_ids)).fetchone()
 
-    # Avval muddati kelgan (due <= now) va eng kichik qutidagi (box ASC) savollar olinadi
-    query = f"""
-        SELECT * FROM questions 
-        WHERE user_id=? AND due<=? AND id NOT IN ({placeholders})
-        ORDER BY box ASC, seen ASC, RANDOM() LIMIT 1
-    """
+    query = (
+        f"SELECT * FROM questions WHERE user_id=? AND due<=? "
+        f"AND id NOT IN ({placeholders}) ORDER BY box ASC, seen ASC, RANDOM() LIMIT 1"
+    )
     return db.execute(query, (uid, now_ts, *exclude_ids)).fetchone()
 
 
@@ -371,7 +367,12 @@ async def send_question_msg(bot, chat_id, uid, q):
     db.execute("UPDATE sessions SET current_q_id=? WHERE user_id=?", (q["id"], uid))
     db.commit()
     box_badge = f"📦 Quti {q['box']}/5"
-    await bot.send_message(chat_id, f"❓ <b>{q['question']}</b>\n<i>{box_badge}</i>", reply_markup=kb, parse_mode="HTML")
+    await bot.send_message(
+        chat_id,
+        f"❓ <b>{q['question']}</b>\n<i>{box_badge}</i>",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
 
 
 async def send_next(bot, chat_id, uid):
@@ -388,7 +389,6 @@ async def send_next(bot, chat_id, uid):
             parse_mode="HTML",
         )
 
-    # Shu sessiya davomida ishlangan savollarni qaytarmaslik uchun
     recent_rows = db.execute(
         "SELECT id FROM questions WHERE user_id=? AND last_ts>=?", (uid, s["started"])
     ).fetchall()
@@ -413,7 +413,9 @@ async def start_session(bot, chat_id, uid, mode):
         if n <= 0:
             return await bot.send_message(chat_id, f"Bugungi {DAILY_LIMIT} ta limit tugadi. Ertaga davom etamiz 💪")
     elif mode == "wrong":
-        n = db.execute("SELECT COUNT(*) c FROM questions WHERE user_id=? AND seen=1 AND last_ok=0", (uid,)).fetchone()["c"]
+        n = db.execute(
+            "SELECT COUNT(*) c FROM questions WHERE user_id=? AND seen=1 AND last_ok=0", (uid,)
+        ).fetchone()["c"]
         if n == 0:
             return await bot.send_message(chat_id, "Xato qilingan savollar yo'q 🎉")
     else:
@@ -436,7 +438,9 @@ async def cmd_start(m: Message):
     inline = None
     if WEBAPP_URL:
         inline = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="✨ Mini App ni ochish", web_app=WebAppInfo(url=WEBAPP_URL))]]
+            inline_keyboard=[
+                [InlineKeyboardButton(text="✨ Mini App ni ochish", web_app=WebAppInfo(url=WEBAPP_URL))]
+            ]
         )
     await m.answer(
         f"Salom, <b>{m.from_user.first_name}</b>! 👋\n\n"
@@ -453,7 +457,7 @@ async def cmd_start(m: Message):
 async def btn_add(m: Message):
     await m.answer(
         "📎 <b>.json</b> fayl yuboring yoki Mini App orqali matn ko'rinishida qo'shing.\n\n"
-        "<code>[{\"question\": \"Abandon\", \"options\": [\"Tark etmoq\", \"Qabul qilmoq\", \"Yugurmoq\", \"O'ylamoq\"], \"answer\": \"Tark etmoq\"}]</code>",
+        '<code>[{"question": "Abandon", "options": ["Tark etmoq", "Qabul qilmoq", "Yugurmoq", "O\'ylamoq"], "answer": "Tark etmoq"}]</code>',
         parse_mode="HTML",
     )
 
@@ -473,7 +477,10 @@ async def on_document(m: Message, bot: Bot):
     except Exception as e:
         return await m.answer(f"❌ Faylni o'qib bo'lmadi: {e}")
     added, dup = add_questions(uid, items)
-    await m.answer(f"✅ Qo'shildi: <b>{added}</b>\n♻️ Takroriy: <b>{dup}</b>\n⚠️ Xato: <b>{len(errors)}</b>", parse_mode="HTML")
+    await m.answer(
+        f"✅ Qo'shildi: <b>{added}</b>\n♻️ Takroriy: <b>{dup}</b>\n⚠️ Xato: <b>{len(errors)}</b>",
+        parse_mode="HTML",
+    )
 
 
 @router.message(F.text == BTN_STATS)
@@ -510,7 +517,6 @@ async def on_answer(cb: CallbackQuery, bot: Bot):
     _, qid_s, pos_s, perm = cb.data.split(":")
     qid, pos = int(qid_s), int(pos_s)
 
-    # Double-click himoyasi
     sess = db.execute("SELECT * FROM sessions WHERE user_id=?", (uid,)).fetchone()
     if sess and sess["current_q_id"] != qid:
         return await cb.answer("Bu savolga allaqachon javob berilgan!")
@@ -593,7 +599,8 @@ async def api_dashboard(request: web.Request):
 
     total = db.execute("SELECT COUNT(*) c FROM questions WHERE user_id=?", (uid,)).fetchone()["c"]
     due = db.execute("SELECT COUNT(*) c FROM questions WHERE user_id=? AND due<=?", (uid, now_ts)).fetchone()["c"]
-    wrong = db.execute("SELECT COUNT(*) c FROM questions WHERE user_id         "=? AND seen=1 AND last_ok=0", (uid,)
+    wrong = db.execute(
+        "SELECT COUNT(*) c FROM questions WHERE user_id=? AND seen=1 AND last_ok=0", (uid,)
     ).fetchone()["c"]
 
     agg = db.execute(
