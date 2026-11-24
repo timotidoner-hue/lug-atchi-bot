@@ -82,6 +82,7 @@
     }
     .stat-val { font-size: 24px; font-weight: 800; color: #60a5fa; }
     .stat-lbl { font-size: 12px; color: var(--hint); margin-top: 4px; }
+
     .boxes-title { font-size: 14px; font-weight: 700; margin-bottom: 12px; display: flex; justify-content: space-between; }
     .box-row { display: flex; align-items: center; margin-bottom: 9px; font-size: 12px; }
     .box-label { width: 96px; color: var(--hint); font-weight: 600; }
@@ -110,7 +111,6 @@
       color: var(--hint); font-weight: 700; font-size: 13px; cursor: pointer;
     }
     .seg-btn.active { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; }
-
     .q-header { display: flex; justify-content: space-between; font-size: 12px; color: var(--hint); margin-bottom: 10px; }
     .q-text { font-size: 18px; font-weight: 700; line-height: 1.45; margin-bottom: 16px; }
     .opt-btn {
@@ -181,7 +181,6 @@
     </div>
   </div>
 
-  <!-- Блокировка до подписки: при нажатии на канал идёт проверка каждую секунду в течение 10 секунд -->
   <div id="sub-gate" class="sub-gate">
     <div>
       <div class="card" style="text-align:center; background:rgba(30,41,59,0.95);">
@@ -202,7 +201,6 @@
     </div>
   </div>
 
-  <!-- 1. ГЛАВНАЯ -->
   <div id="tab-home" class="tab active">
     <div class="header">
       <h1>Лейтнер Тренажёр</h1>
@@ -233,7 +231,6 @@
     </div>
   </div>
 
-  <!-- 2. ТЕСТ -->
   <div id="tab-quiz" class="tab">
     <div class="header">
       <h1 id="quiz-mode-title">Тест</h1>
@@ -244,12 +241,11 @@
         <span id="q-box-badge">📦 Ящик 0</span>
         <span id="q-feedback"></span>
       </div>
-      <div class="q-text" id="q-text">Загрузка вопроса...</div>
+      <div class="q-text" id="q-text">Здесь ничего нет</div>
       <div id="q-options"></div>
     </div>
     <button class="btn btn-primary" id="next-btn" style="display:none;" onclick="loadNextQuestion()">Следующий вопрос ➔</button>
   </div>
-  <!-- 3. ДОБАВИТЬ ВОПРОС -->
   <div id="tab-add" class="tab">
     <div class="header">
       <h1>➕ Добавить тест</h1>
@@ -319,7 +315,6 @@
     </div>
   </div>
 
-  <!-- 4. РЕЙТИНГ -->
   <div id="tab-rating" class="tab">
     <div class="header">
       <h1>🏆 Рейтинг</h1>
@@ -330,7 +325,6 @@
     </div>
   </div>
 
-  <!-- 5. ПРОФИЛЬ -->
   <div id="tab-profile" class="tab">
     <div class="header">
       <h1>👤 Профиль</h1>
@@ -368,9 +362,18 @@
 
     <div id="admin-profile-panel" style="display:none;">
       <div class="card">
-        <div style="font-weight:800; font-size:15px; margin-bottom:10px;">👑 Добавление тестов администратором</div>
+        <div style="font-weight:800; font-size:15px; margin-bottom:10px;">👑 Добавление и редактирование тестов</div>
         <button class="btn btn-primary" onclick="jumpToAdminAdd('personal')">👤 Добавить тест для себя</button>
         <button class="btn btn-warning" onclick="jumpToAdminAdd('global')">🌍 Добавить тест для всех</button>
+        <button class="btn btn-ghost" onclick="toggleAdminEditor()">✏️ Редактировать тесты</button>
+
+        <div id="admin-test-editor" style="display:none; margin-top:12px;">
+          <div class="seg-tabs">
+            <button class="seg-btn active" id="ed-scope-personal" onclick="selectEditorScope('personal')">👤 Для себя</button>
+            <button class="seg-btn" id="ed-scope-global" onclick="selectEditorScope('global')">🌍 Для всех</button>
+          </div>
+          <div id="admin-editor-list"></div>
+        </div>
       </div>
 
       <div class="card">
@@ -424,6 +427,8 @@
     let seenIds = [];
     let draftPlain = null;
     let addScope = 'personal';
+    let editorScope = 'personal';
+    let editorOpen = false;
     let dashData = null;
     let subPollTimer = null;
     let currentMissingChannels = [];
@@ -733,6 +738,52 @@
       showToast('Канал удалён', 'info');
     }
 
+    function toggleAdminEditor() {
+      editorOpen = !editorOpen;
+      document.getElementById('admin-test-editor').style.display = editorOpen ? 'block' : 'none';
+      if (editorOpen) loadAdminQuestions(editorScope);
+    }
+
+    function selectEditorScope(scope) {
+      editorScope = scope;
+      document.getElementById('ed-scope-personal').classList.toggle('active', scope === 'personal');
+      document.getElementById('ed-scope-global').classList.toggle('active', scope === 'global');
+      loadAdminQuestions(scope);
+    }
+
+    async function loadAdminQuestions(scope) {
+      const wrap = document.getElementById('admin-editor-list');
+      wrap.innerHTML = '<p style="font-size:12px; color:var(--hint);">Загрузка...</p>';
+      const res = await api(`/api/admin/questions?scope=${scope}`);
+      if (res.error) return showToast(res.error, 'error');
+
+      const list = res.questions || [];
+      wrap.innerHTML = '';
+      if (!list.length) {
+        wrap.innerHTML = '<div class="list-item"><div style="font-size:13px; color:var(--hint);">Здесь ничего нет</div></div>';
+        return;
+      }
+
+      list.forEach(q => {
+        wrap.innerHTML += `
+          <div class="list-item">
+            <div>
+              <div style="font-weight:700; font-size:13px;">❓ ${q.question}</div>
+              <div style="font-size:11px; color:#6ee7b7; margin-top:3px;">✔️ ${q.answer}</div>
+            </div>
+            <button class="btn btn-danger" style="margin:0; padding:7px 10px; font-size:12px; width:auto;" onclick="deleteAdminQuestion(${q.id}, '${scope}')">🗑</button>
+          </div>`;
+      });
+    }
+
+    async function deleteAdminQuestion(id, scope) {
+      const res = await api('/api/admin/questions/delete', 'POST', { id, scope });
+      if (res.error) return showToast(res.error, 'error');
+      showToast('Тест удалён', 'success');
+      await loadAdminQuestions(scope);
+      await loadDashboard();
+    }
+
     function startQuiz(mode) {
       currentMode = mode;
       sessionDone = 0;
@@ -749,15 +800,15 @@
       answered = false;
       document.getElementById('next-btn').style.display = 'none';
       document.getElementById('q-feedback').textContent = '';
-      document.getElementById('q-text').textContent = 'Загрузка вопроса...';
+      document.getElementById('q-text').textContent = 'Здесь ничего нет';
       document.getElementById('q-options').innerHTML = '';
 
       const data = await api(`/api/question?mode=${currentMode}&exclude=${seenIds.join(',')}`);
       if (data.sub_required) return;
       if (!data.question) {
-        document.getElementById('q-text').textContent = '🎉 Вопросы на сейчас закончились!';
-        document.getElementById('q-box-badge').textContent = 'Готово';
-        showToast('Все доступные вопросы пройдены!', 'success');
+        document.getElementById('q-text').textContent = 'Здесь ничего нет';
+        document.getElementById('q-box-badge').textContent = 'Пусто';
+        showToast('Здесь ничего нет', 'info');
         return;
       }
 
@@ -870,7 +921,6 @@
         );
       }
     }
-
     function handleFileSelect(event) {
       const file = event.target.files[0];
       if (!file) return;
@@ -882,6 +932,7 @@
       };
       reader.readAsText(file, 'utf-8');
     }
+
     async function importJson() {
       const text = document.getElementById('json-input').value.trim();
       if (!text) return showToast('Выберите файл или вставьте JSON', 'error');
