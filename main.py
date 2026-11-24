@@ -28,9 +28,8 @@ from aiogram.types import (
 )
 
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("leitner_ru_bot")
+log = logging.getLogger("leitner_pro_ru")
 
-# ---------------- Настройки ----------------
 TOKEN = os.environ["BOT_TOKEN"]
 WEBAPP_URL = os.getenv("WEBAPP_URL", "").rstrip("/")
 PORT = int(os.getenv("PORT", 8080))
@@ -40,12 +39,25 @@ DATA_DIR = (
     or ("/data" if os.path.isdir("/data") else ".")
 )
 TZ = ZoneInfo(os.getenv("BOT_TZ", "Asia/Tashkent"))
+
+BASE_PERSONAL_LIMIT = 30
+REFERRAL_BONUS_LIMIT = 50
 AUTO_HOUR = 16
 AUTO_COUNT = 10
 DAILY_LIMIT = 50
 
-# Интервалы Эббингауза + Лейтнера (в секундах)
-# Ящик 0: 10 минут, Ящик 1: 1 день, Ящик 2: 3 дня, Ящик 3: 7 дней, Ящик 4: 16 дней, Ящик 5: 35 дней
+
+def parse_admin_ids() -> set[int]:
+    raw = os.getenv("ADMIN_IDS", "")
+    ids: set[int] = set()
+    for part in re.split(r"[,\s;]+", raw.strip()):
+        if part.isdigit():
+            ids.add(int(part))
+    return ids
+
+
+ADMIN_IDS = parse_admin_ids()
+
 LEITNER_INTERVALS = {
     0: 600,
     1: 86400,
@@ -55,7 +67,6 @@ LEITNER_INTERVALS = {
     5: 35 * 86400,
 }
 
-# ---------------- База данных (WAL) ----------------
 os.makedirs(DATA_DIR, exist_ok=True)
 if DATA_DIR == ".":
     log.warning("Том не подключён: база будет сбрасываться при каждом деплое! Подключите Volume (/data) в Railway.")
@@ -70,6 +81,10 @@ db.executescript(
 CREATE TABLE IF NOT EXISTS users(
     user_id INTEGER PRIMARY KEY,
     full_name TEXT DEFAULT '',
+    username TEXT DEFAULT '',
+    referred_by INTEGER,
+    referral_count INTEGER DEFAULT 0,
+    bonus_limit INTEGER DEFAULT 0,
     streak INTEGER DEFAULT 0,
     last_active TEXT,
     day TEXT,
@@ -79,6 +94,7 @@ CREATE TABLE IF NOT EXISTS users(
 CREATE TABLE IF NOT EXISTS questions(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
+    scope TEXT DEFAULT 'personal',
     h TEXT,
     question TEXT,
     options TEXT,
@@ -90,7 +106,7 @@ CREATE TABLE IF NOT EXISTS questions(
     last_ok INTEGER DEFAULT 0,
     due INTEGER DEFAULT 0,
     last_ts INTEGER DEFAULT 0,
-    UNIQUE(user_id, h)
+    UNIQUE(user_id, scope, h)
 );
 CREATE TABLE IF NOT EXISTS sessions(
     user_id INTEGER PRIMARY KEY,
@@ -101,20 +117,38 @@ CREATE TABLE IF NOT EXISTS sessions(
     mode TEXT,
     started INTEGER DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS pending_drafts(
+    draft_id TEXT PRIMARY KEY,
+    user_id INTEGER,
+    scope TEXT DEFAULT 'personal',
+    question TEXT,
+    options TEXT,
+    created_ts INTEGER
+);
 """
 )
 
 for _sql in (
     "ALTER TABLE users ADD COLUMN full_name TEXT DEFAULT ''",
+    "ALTER TABLE users ADD COLUMN username TEXT DEFAULT ''",
+    "ALTER TABLE users ADD COLUMN referred_by INTEGER",
+    "ALTER TABLE users ADD COLUMN referral_count INTEGER DEFAULT 0",
+    "ALTER TABLE users ADD COLUMN bonus_limit INTEGER DEFAULT 0",
+    "ALTER TABLE questions ADD COLUMN scope TEXT DEFAULT 'personal'",
     "ALTER TABLE questions ADD COLUMN box INTEGER DEFAULT 0",
     "ALTER TABLE questions ADD COLUMN correct_count INTEGER DEFAULT 0",
     "ALTER TABLE sessions ADD COLUMN current_q_id INTEGER DEFAULT 0",
+    "ALTER TABLE pending_drafts ADD COLUMN scope TEXT DEFAULT 'personal'",
 ):
     try:
         db.execute(_sql)
     except sqlite3.OperationalError:
         pass
 db.commit()
+
+
+def is_admin(uid: int) -> bool:
+    return uid in ADMIN_IDS
 
 
 def now_dt():
@@ -125,22 +159,61 @@ def today():
     return now_dt().date().isoformat()
 
 
-def ensure_user(uid, full_name=""):
+def sync_global_questions_for_user(uid: int):
+    globals_rows = db.execute("SELECT * FROM questions WHERE user_id=0 AND scope='global'").fetchall()
+    for g in globals_rows:
+        try:
+            db.execute(
+                "INSERT INTO questions(user_id,scope,h,question,options,correct,box,due) VALUES(?,?,?,?,?,?,0,0)",
+                (uid, "global", g["h"], g["question"], g["options"], g["correct"]),
+            )
+        except sqlite3.IntegrityError:
+            pass
+    db.commit()
+
+
+def ensure_user(uid: int, full_name: str = "", username: str = "", ref_by: int | None = None):
     row = db.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
     if not row:
         la = today() if now_dt().hour >= AUTO_HOUR else None
+        valid_ref = None
+        if ref_by and ref_by != uid:
+            ref_exists = db.execute("SELECT user_id FROM users WHERE user_id=?", (ref_by,)).fetchone()
+            if ref_exists:
+                valid_ref = ref_by
+
         db.execute(
-            "INSERT INTO users(user_id, full_name, last_auto) VALUES(?,?,?)",
-            (uid, full_name, la),
+            "INSERT INTO users(user_id, full_name, username, referred_by, last_auto) VALUES(?,?,?,?,?)",
+            (uid, full_name, username, valid_ref, la),
         )
+        if valid_ref:
+            db.execute(
+                "UPDATE users SET referral_count = referral_count + 1, bonus_limit = bonus_limit + ? WHERE user_id=?",
+                (REFERRAL_BONUS_LIMIT, valid_ref),
+            )
         db.commit()
-    elif full_name and row["full_name"] != full_name:
-        db.execute("UPDATE users SET full_name=? WHERE user_id=?", (full_name, uid))
-        db.commit()
+        sync_global_questions_for_user(uid)
+        return True
+    else:
+        updates = []
+        params = []
+        if full_name and row["full_name"] != full_name:
+            updates.append("full_name=?")
+            params.append(full_name)
+        if username and row["username"] != username:
+            updates.append("username=?")
+            params.append(username)
+        if updates:
+            params.append(uid)
+            db.execute(f"UPDATE users SET {', '.join(updates)} WHERE user_id=?", params)
+            db.commit()
+        return False
 
 
-def touch_streak(uid):
+def touch_streak(uid: int):
     u = db.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
+    if not u:
+        return
     t = today()
     if u["last_active"] == t:
         return
@@ -150,7 +223,7 @@ def touch_streak(uid):
     db.commit()
 
 
-def streak_now(uid):
+def streak_now(uid: int) -> int:
     u = db.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
     if not u or not u["last_active"]:
         return 0
@@ -158,18 +231,45 @@ def streak_now(uid):
     return u["streak"] if u["last_active"] in (today(), y) else 0
 
 
-def day_count(uid):
+def day_count(uid: int) -> int:
     u = db.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
     return u["day_count"] if u and u["day"] == today() else 0
 
 
-def bump_day(uid):
+def bump_day(uid: int):
     c = day_count(uid) + 1
     db.execute("UPDATE users SET day=?, day_count=? WHERE user_id=?", (today(), c, uid))
     db.commit()
 
 
-# ---------------- Парсинг JSON ----------------
+def personal_count(uid: int) -> int:
+    return db.execute(
+        "SELECT COUNT(*) c FROM questions WHERE user_id=? AND scope='personal'", (uid,)
+    ).fetchone()["c"]
+
+
+def personal_limit(uid: int) -> int:
+    if is_admin(uid):
+        return 999999
+    u = db.execute("SELECT bonus_limit FROM users WHERE user_id=?", (uid,)).fetchone()
+    bonus = u["bonus_limit"] if u and u["bonus_limit"] else 0
+    return BASE_PERSONAL_LIMIT + bonus
+
+
+def personal_remaining(uid: int) -> int:
+    if is_admin(uid):
+        return 999999
+    return max(0, personal_limit(uid) - personal_count(uid))
+
+
+JSON_FORMAT_EXAMPLE = """[
+  {
+    "question": "Столица России?",
+    "options": ["Москва", "Санкт-Петербург", "Казань", "Новосибирск"],
+    "answer": "Москва"
+  }
+]"""
+
 LIST_KEYS = ("questions", "tests", "data", "items", "вопросы", "тесты", "карточки")
 Q_KEYS = ("question", "q", "text", "вопрос", "текст", "задание")
 O_KEYS = ("options", "variants", "choices", "answers", "варианты", "ответы", "выбор")
@@ -189,6 +289,19 @@ def decode_bytes(raw):
         except (UnicodeDecodeError, UnicodeError):
             continue
     raise ValueError("Неизвестная кодировка файла (используйте UTF-8)")
+
+
+def parse_plain_lines(raw_text: str):
+    lines = [norm(line) for line in raw_text.replace("\r\n", "\n").split("\n") if norm(line)]
+    if len(lines) < 3:
+        raise ValueError("Введите вопрос и минимум 2 варианта ответа (каждый с новой строки)")
+    if len(lines) > 7:
+        raise ValueError("Максимум 1 вопрос и 6 вариантов ответа")
+    question = lines[0]
+    options = lines[1:]
+    if len({o.lower() for o in options}) < len(options):
+        raise ValueError("Варианты ответа не должны повторяться")
+    return question, options
 
 
 def pick(d, keys):
@@ -266,24 +379,68 @@ def qhash(q):
     return hashlib.sha1(t.encode()).hexdigest()
 
 
-def add_questions(uid, items):
-    added = dup = 0
+def add_questions_with_scope(uid: int, items: list, scope: str = "personal"):
+    target_scope = "global" if (scope == "global" and is_admin(uid)) else "personal"
+    added = dup = skipped_limit = 0
+    allowed = personal_remaining(uid) if target_scope == "personal" else len(items)
+
     for q, opts, correct in items:
+        if target_scope == "personal" and added >= allowed:
+            skipped_limit += 1
+            continue
+
         h = qhash(q)
-        try:
-            db.execute(
-                "INSERT INTO questions(user_id,h,question,options,correct,box,due) VALUES(?,?,?,?,?,0,0)",
-                (uid, h, q, json.dumps(opts, ensure_ascii=False), correct),
-            )
-            added += 1
-        except sqlite3.IntegrityError:
-            dup += 1
+        if target_scope == "global":
+            try:
+                db.execute(
+                    "INSERT INTO questions(user_id,scope,h,question,options,correct,box,due) VALUES(0,'global',?,?,?,?,0,0)",
+                    (h, q, json.dumps(opts, ensure_ascii=False), correct),
+                )
+            except sqlite3.IntegrityError:
+                pass
+            all_users = db.execute("SELECT user_id FROM users").fetchall()
+            user_added = False
+            for u in all_users:
+                try:
+                    db.execute(
+                        "INSERT INTO questions(user_id,scope,h,question,options,correct,box,due) VALUES(?,'global',?,?,?,?,0,0)",
+                        (u["user_id"], h, q, json.dumps(opts, ensure_ascii=False), correct),
+                    )
+                    user_added = True
+                except sqlite3.IntegrityError:
+                    pass
+            if user_added:
+                added += 1
+            else:
+                dup += 1
+        else:
+            try:
+                db.execute(
+                    "INSERT INTO questions(user_id,scope,h,question,options,correct,box,due) VALUES(?,'personal',?,?,?,?,0,0)",
+                    (uid, h, q, json.dumps(opts, ensure_ascii=False), correct),
+                )
+                added += 1
+            except sqlite3.IntegrityError:
+                dup += 1
+
     db.commit()
-    return added, dup
+    return {
+        "added": added,
+        "dup": dup,
+        "skipped_limit": skipped_limit,
+        "scope": target_scope,
+    }
+def create_draft(uid: int, question: str, options: list[str], scope: str = "personal") -> str:
+    draft_id = hashlib.sha1(f"{uid}:{time.time_ns()}:{random.random()}".encode()).hexdigest()[:12]
+    db.execute(
+        "INSERT INTO pending_drafts(draft_id,user_id,scope,question,options,created_ts) VALUES(?,?,?,?,?,?)",
+        (draft_id, uid, scope, question, json.dumps(options, ensure_ascii=False), int(time.time())),
+    )
+    db.commit()
+    return draft_id
 
 
-# ---------------- Логика Эббингауза + Лейтнера ----------------
-def apply_leitner_answer(uid, qid, is_ok):
+def apply_leitner_answer(uid: int, qid: int, is_ok: bool):
     q = db.execute("SELECT * FROM questions WHERE id=? AND user_id=?", (qid, uid)).fetchone()
     if not q:
         return None
@@ -302,7 +459,7 @@ def apply_leitner_answer(uid, qid, is_ok):
     return {"old_box": old_box, "new_box": new_box, "next_due": next_due}
 
 
-def pick_question(uid, mode="due", exclude_ids=None):
+def pick_question(uid: int, mode: str = "due", exclude_ids=None):
     exclude_ids = exclude_ids or []
     placeholders = ",".join("?" * len(exclude_ids)) if exclude_ids else "0"
     now_ts = int(time.time())
@@ -321,10 +478,88 @@ def pick_question(uid, mode="due", exclude_ids=None):
     return db.execute(query, (uid, now_ts, *exclude_ids)).fetchone()
 
 
-# ---------------- Клавиатура бота ----------------
+def compute_user_score(uid: int) -> int:
+    agg = db.execute(
+        "SELECT COALESCE(SUM(correct_count),0) cor, COALESCE(SUM(box),0) box_sum FROM questions WHERE user_id=?",
+        (uid,),
+    ).fetchone()
+    return int(agg["cor"]) * 10 + int(agg["box_sum"]) * 5 + streak_now(uid) * 15
+
+
+def build_leaderboard(limit: int = 20) -> list[dict]:
+    users = db.execute("SELECT user_id, full_name, username FROM users").fetchall()
+    board = []
+    for u in users:
+        uid = u["user_id"]
+        agg = db.execute(
+            "SELECT COALESCE(SUM(attempts),0) att, COALESCE(SUM(correct_count),0) cor, COALESCE(SUM(box),0) box_sum "
+            "FROM questions WHERE user_id=?",
+            (uid,),
+        ).fetchone()
+        acc = round((agg["cor"] / agg["att"]) * 100) if agg["att"] > 0 else 0
+        score = int(agg["cor"]) * 10 + int(agg["box_sum"]) * 5 + streak_now(uid) * 15
+        board.append({
+            "user_id": uid,
+            "name": u["full_name"] or f"Пользователь {uid}",
+            "username": u["username"] or "",
+            "score": score,
+            "correct": int(agg["cor"]),
+            "accuracy": acc,
+            "streak": streak_now(uid),
+        })
+    board.sort(key=lambda x: (-x["score"], -x["correct"], x["user_id"]))
+    for idx, item in enumerate(board[:limit], 1):
+        item["rank"] = idx
+    return board[:limit]
+
+
+def build_admin_users_list() -> list[dict]:
+    users = db.execute("SELECT * FROM users ORDER BY user_id DESC").fetchall()
+    result = []
+    for u in users:
+        uid = u["user_id"]
+        total_q = db.execute("SELECT COUNT(*) c FROM questions WHERE user_id=?", (uid,)).fetchone()["c"]
+        own_q = db.execute(
+            "SELECT COUNT(*) c FROM questions WHERE user_id=? AND scope='personal'", (uid,)
+        ).fetchone()["c"]
+        agg = db.execute(
+            "SELECT COALESCE(SUM(attempts),0) att, COALESCE(SUM(correct_count),0) cor, COALESCE(SUM(box),0) box_sum "
+            "FROM questions WHERE user_id=?",
+            (uid,),
+        ).fetchone()
+        boxes = {str(i): 0 for i in range(6)}
+        for r in db.execute(
+            "SELECT box, COUNT(*) c FROM questions WHERE user_id=? GROUP BY box", (uid,)
+        ).fetchall():
+            boxes[str(r["box"])] = r["c"]
+
+        acc = round((agg["cor"] / agg["att"]) * 100) if agg["att"] > 0 else 0
+        score = int(agg["cor"]) * 10 + int(agg["box_sum"]) * 5 + streak_now(uid) * 15
+        result.append({
+            "user_id": uid,
+            "name": u["full_name"] or f"Пользователь {uid}",
+            "username": u["username"] or "",
+            "streak": streak_now(uid),
+            "accuracy": acc,
+            "score": score,
+            "total_questions": total_q,
+            "own_questions": own_q,
+            "personal_limit": personal_limit(uid),
+            "referral_count": u["referral_count"] or 0,
+            "boxes": boxes,
+        })
+    result.sort(key=lambda x: (-x["score"], -x["total_questions"]))
+    return result
+
+
+def get_referral_link(bot_username: str | None, uid: int) -> str:
+    uname = (bot_username or os.getenv("BOT_USERNAME", "your_bot")).lstrip("@")
+    return f"https://t.me/{uname}?start=ref_{uid}"
+
+
 BTN_WORK = "📝 Пройти тест"
 BTN_WRONG = "❌ Работа над ошибками"
-BTN_ADD = "➕ Добавить JSON"
+BTN_ADD = "➕ Добавить тест"
 BTN_STATS = "📊 Статистика"
 
 
@@ -341,7 +576,6 @@ def get_menu():
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
-# ---------------- Обработчики Telegram ----------------
 router = Router()
 
 
@@ -356,11 +590,12 @@ async def send_question_msg(bot, chat_id, uid, q):
             for p, i in enumerate(order)
         ]
     )
+    scope_label = "🌍 Общий" if q["scope"] == "global" else "👤 Личный"
     db.execute("UPDATE sessions SET current_q_id=? WHERE user_id=?", (q["id"], uid))
     db.commit()
     await bot.send_message(
         chat_id,
-        f"❓ <b>{q['question']}</b>\n<i>📦 Ящик Лейтнера: {q['box']}/5</i>",
+        f"❓ <b>{q['question']}</b>\n<i>{scope_label} • 📦 Ящик Лейтнера: {q['box']}/5</i>",
         reply_markup=kb,
         parse_mode="HTML",
     )
@@ -376,7 +611,7 @@ async def send_next(bot, chat_id, uid):
         pct = round(s["ok"] / s["total"] * 100) if s["total"] else 0
         return await bot.send_message(
             chat_id,
-            f"🏁 Сессия завершена: <b>{s['ok']}/{s['total']}</b> ({pct}%)\n🔥 Ударный режим: <b>{streak_now(uid)} дн.</b>",
+            f"🏁 Сессия завершена: <b>{s['ok']}/{s['total']}</b> ({pct}%)\n🔥 Серия дней: <b>{streak_now(uid)} дн.</b>",
             parse_mode="HTML",
         )
 
@@ -424,8 +659,29 @@ async def start_session(bot, chat_id, uid, mode):
 
 
 @router.message(CommandStart())
-async def cmd_start(m: Message):
-    ensure_user(m.from_user.id, m.from_user.full_name)
+async def cmd_start(m: Message, bot: Bot):
+    uid = m.from_user.id
+    args = (m.text or "").split(maxsplit=1)
+    ref_by = None
+    if len(args) > 1 and args[1].startswith("ref_"):
+        raw_ref = args[1][4:]
+        if raw_ref.isdigit():
+            ref_by = int(raw_ref)
+
+    is_new = ensure_user(uid, m.from_user.full_name or "", m.from_user.username or "", ref_by)
+    if is_new and ref_by and ref_by != uid:
+        ref_row = db.execute("SELECT user_id FROM users WHERE user_id=?", (ref_by,)).fetchone()
+        if ref_row:
+            try:
+                await bot.send_message(
+                    ref_by,
+                    f"🎉 По вашей реферальной ссылке присоединился <b>{m.from_user.full_name}</b>!\n"
+                    f"Вам начислено <b>+{REFERRAL_BONUS_LIMIT}</b> к лимиту личных тестов.",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+
     inline = None
     if WEBAPP_URL:
         inline = InlineKeyboardMarkup(
@@ -433,10 +689,12 @@ async def cmd_start(m: Message):
                 [InlineKeyboardButton(text="✨ Открыть Mini App", web_app=WebAppInfo(url=WEBAPP_URL))]
             ]
         )
+    role_note = "\n👑 <b>Режим администратора активирован.</b>" if is_admin(uid) else ""
     await m.answer(
         f"Привет, <b>{m.from_user.first_name}</b>! 👋\n\n"
-        "Этот бот помогает запоминать материал по методу <b>кривой забывания Эббингауза</b> и <b>системы карточек Лейтнера</b>.\n\n"
-        "Вы можете проходить тесты прямо в чате или открыть удобное <b>Mini App</b> с профилем, статистикой и всплывающими окнами.",
+        "Этот бот помогает запоминать материал по методу <b>кривой забывания Эббингауза</b> и <b>системы Лейтнера</b>.\n"
+        "Работают личные тесты и общие тесты администратора как в чате, так и в Mini App."
+        f"{role_note}",
         reply_markup=get_menu(),
         parse_mode="HTML",
     )
@@ -445,13 +703,32 @@ async def cmd_start(m: Message):
 
 
 @router.message(F.text == BTN_ADD)
-async def btn_add(m: Message):
+async def btn_add(m: Message, bot: Bot):
+    uid = m.from_user.id
+    ensure_user(uid, m.from_user.full_name or "", m.from_user.username or "")
+    me = await bot.get_me()
+    ref_link = get_referral_link(me.username, uid)
+
+    if is_admin(uid):
+        await m.answer(
+            "📥 <b>Добавление тестов (Администратор):</b>\n\n"
+            "• Отправьте <b>.json файл</b> или <b>JSON-текст</b> — добавятся в ваши тесты.\n"
+            "• Или отправьте <b>простой текст</b> (1-я строка — вопрос, далее варианты с новой строки) — выберите правильный вариант нажатием.\n"
+            "• Для выбора <b>«Для себя»</b> или <b>«Для всех»</b> откройте Mini App (вкладка «Добавить» или «Профиль»).\n\n"
+            f"<b>Формат JSON:</b>\n<pre>{JSON_FORMAT_EXAMPLE}</pre>",
+            parse_mode="HTML",
+        )
+        return
+
+    used = personal_count(uid)
+    lim = personal_limit(uid)
     await m.answer(
-        "📥 <b>Как добавить вопросы:</b>\n\n"
-        "1. Отправьте сюда <b>.json</b> файл как документ.\n"
-        "2. Или просто отправьте в чат текст в формате JSON (или добавьте его через Mini App).\n\n"
-        "Пример:\n"
-        '<code>[{"question": "Capital of Russia?", "options": ["Москва", "Санкт-Петербург", "Казань"], "answer": "Москва"}]</code>',
+        f"📥 <b>Добавление личных тестов:</b>\n"
+        f"Использовано: <b>{used}/{lim}</b> (базовый лимит {BASE_PERSONAL_LIMIT}, +{REFERRAL_BONUS_LIMIT} за каждого приглашённого друга).\n\n"
+        "1. <b>Простым текстом:</b> 1-я строка — вопрос, со 2-й строки каждый вариант с Enter. Нажмите на верный вариант в квизе.\n"
+        "2. <b>Файлом .json</b> или <b>JSON-текстом</b>.\n\n"
+        f"<b>Формат JSON:</b>\n<pre>{JSON_FORMAT_EXAMPLE}</pre>\n\n"
+        f"🔗 Ваша реферальная ссылка (+{REFERRAL_BONUS_LIMIT} тестов за друга):\n<code>{ref_link}</code>",
         parse_mode="HTML",
     )
 
@@ -459,7 +736,7 @@ async def btn_add(m: Message):
 @router.message(F.document)
 async def on_document(m: Message, bot: Bot):
     uid = m.from_user.id
-    ensure_user(uid, m.from_user.full_name)
+    ensure_user(uid, m.from_user.full_name or "", m.from_user.username or "")
     doc = m.document
     if not (doc.file_name or "").lower().endswith(".json"):
         return await m.answer("Пожалуйста, отправьте файл с расширением <b>.json</b>.", parse_mode="HTML")
@@ -472,28 +749,43 @@ async def on_document(m: Message, bot: Bot):
         items, errors = parse_items(data)
     except Exception as e:
         return await m.answer(f"❌ Ошибка при чтении файла: {e}")
-    added, dup = add_questions(uid, items)
-    msg = f"✅ Добавлено: <b>{added}</b>\n♻️ Уже было в базе: <b>{dup}</b>"
+
+    res = add_questions_with_scope(uid, items, "personal")
+    msg = (
+        f"✅ Добавлено: <b>{res['added']}</b>\n"
+        f"♻️ Дубликатов пропущено: <b>{res['dup']}</b>\n"
+        f"📌 Лимит: <b>{personal_count(uid)}/{personal_limit(uid)}</b>"
+    )
+    if res["skipped_limit"]:
+        me = await bot.get_me()
+        msg += f"\n⛔ Не добавлено из-за лимита: <b>{res['skipped_limit']}</b>\nПригласите друга: <code>{get_referral_link(me.username, uid)}</code>"
     if errors:
-        msg += f"\n⚠️ Пропущено с ошибкой: <b>{len(errors)}</b>\n" + "\n".join(errors[:5])
+        msg += f"\n⚠️ Ошибок разбора: <b>{len(errors)}</b>\n" + "\n".join(errors[:5])
     await m.answer(msg, parse_mode="HTML")
 
 
 @router.message(F.text == BTN_STATS)
-async def btn_stats(m: Message):
+async def btn_stats(m: Message, bot: Bot):
     uid = m.from_user.id
-    ensure_user(uid, m.from_user.full_name)
+    ensure_user(uid, m.from_user.full_name or "", m.from_user.username or "")
+    me = await bot.get_me()
     now_ts = int(time.time())
     total = db.execute("SELECT COUNT(*) c FROM questions WHERE user_id=?", (uid,)).fetchone()["c"]
     due = db.execute("SELECT COUNT(*) c FROM questions WHERE user_id=? AND due<=?", (uid, now_ts)).fetchone()["c"]
     mastered = db.execute("SELECT COUNT(*) c FROM questions WHERE user_id=? AND box>=4", (uid,)).fetchone()["c"]
+    u = db.execute("SELECT referral_count FROM users WHERE user_id=?", (uid,)).fetchone()
+    refs = u["referral_count"] if u else 0
+
     await m.answer(
         f"📊 <b>Ваша статистика:</b>\n\n"
         f"📚 Всего вопросов: <b>{total}</b>\n"
+        f"✍️ Личных тестов: <b>{personal_count(uid)}/{personal_limit(uid)}</b>\n"
         f"⏳ Готово к повторению: <b>{due}</b>\n"
         f"🏆 Закреплено (Ящики 4–5): <b>{mastered}</b>\n"
+        f"⭐ Рейтинговые очки: <b>{compute_user_score(uid)}</b>\n"
         f"🔥 Серия дней: <b>{streak_now(uid)}</b>\n"
-        f"📅 Сегодня пройдено: <b>{day_count(uid)}/{DAILY_LIMIT}</b>",
+        f"👥 Приглашено друзей: <b>{refs}</b>\n"
+        f"🔗 Реферальная ссылка:\n<code>{get_referral_link(me.username, uid)}</code>",
         parse_mode="HTML",
     )
 
@@ -509,21 +801,100 @@ async def btn_wrong(m: Message, bot: Bot):
 
 
 @router.message(F.text)
-async def on_text_json_or_fallback(m: Message):
+async def on_text_input(m: Message, bot: Bot):
     txt = (m.text or "").strip()
+    if not txt:
+        return
+    uid = m.from_user.id
+    ensure_user(uid, m.from_user.full_name or "", m.from_user.username or "")
+
     if txt.startswith("[") or txt.startswith("{"):
-        uid = m.from_user.id
-        ensure_user(uid, m.from_user.full_name)
         try:
             data = json.loads(decode_bytes(txt.encode("utf-8")))
             items, errors = parse_items(data)
         except Exception as e:
             return await m.answer(f"❌ Некорректный JSON: {e}")
-        added, dup = add_questions(uid, items)
-        msg = f"✅ Добавлено: <b>{added}</b>\n♻️ Дубликатов пропущено: <b>{dup}</b>"
+
+        res = add_questions_with_scope(uid, items, "personal")
+        msg = (
+            f"✅ Добавлено: <b>{res['added']}</b>\n"
+            f"♻️ Дубликатов пропущено: <b>{res['dup']}</b>\n"
+            f"📌 Лимит: <b>{personal_count(uid)}/{personal_limit(uid)}</b>"
+        )
+        if res["skipped_limit"]:
+            me = await bot.get_me()
+            msg += f"\n⛔ Пропущено из-за лимита: <b>{res['skipped_limit']}</b>\nСсылка: <code>{get_referral_link(me.username, uid)}</code>"
         if errors:
             msg += f"\n⚠️ Ошибок: <b>{len(errors)}</b>\n" + "\n".join(errors[:5])
         return await m.answer(msg, parse_mode="HTML")
+
+    if "\n" in txt:
+        if not is_admin(uid) and personal_remaining(uid) <= 0:
+            me = await bot.get_me()
+            return await m.answer(
+                f"⛔ Вы достигли лимита ({personal_limit(uid)} тестов).\n"
+                f"Пригласите друга по ссылке (+{REFERRAL_BONUS_LIMIT} тестов):\n<code>{get_referral_link(me.username, uid)}</code>",
+                parse_mode="HTML",
+            )
+        try:
+            question, options = parse_plain_lines(txt)
+        except ValueError as e:
+            return await m.answer(f"⚠️ {e}")
+
+        draft_id = create_draft(uid, question, options, "personal")
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text=opt, callback_data=f"setans:{draft_id}:{idx}")]
+                for idx, opt in enumerate(options)
+            ]
+        )
+        return await m.answer(
+            f"📝 <b>Предпросмотр теста:</b>\n❓ <b>{question}</b>\n\n"
+            "Нажмите на <b>правильный вариант ответа</b>, чтобы сохранить вопрос:",
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
+@router.callback_query(F.data.startswith("setans:"))
+async def on_set_answer(cb: CallbackQuery):
+    uid = cb.from_user.id
+    _, draft_id, idx_s = cb.data.split(":")
+    idx = int(idx_s)
+
+    draft = db.execute(
+        "SELECT * FROM pending_drafts WHERE draft_id=? AND user_id=?", (draft_id, uid)
+    ).fetchone()
+    if not draft:
+        return await cb.answer("Черновик устарел или уже сохранён", show_alert=True)
+
+    options = json.loads(draft["options"])
+    if idx < 0 or idx >= len(options):
+        return await cb.answer("Неверный вариант", show_alert=True)
+
+    scope = draft["scope"] or "personal"
+    res = add_questions_with_scope(uid, [(draft["question"], options, idx)], scope)
+    db.execute("DELETE FROM pending_drafts WHERE draft_id=?", (draft_id,))
+    db.commit()
+
+    try:
+        await cb.message.delete()
+    except Exception:
+        pass
+
+    if res["added"]:
+        await cb.answer("✅ Правильный ответ сохранён!")
+        await cb.message.answer(
+            f"✅ <b>Вопрос добавлен!</b>\n\n"
+            f"❓ {draft['question']}\n"
+            f"✔️ Правильный ответ: <b>{options[idx]}</b>\n"
+            f"📦 Начальный ящик: <b>0/5</b>",
+            parse_mode="HTML",
+        )
+    elif res["skipped_limit"]:
+        await cb.answer("⛔ Лимит тестов исчерпан", show_alert=True)
+        await cb.message.answer("⛔ Достигнут лимит личных тестов. Пригласите друга для увеличения лимита.")
+    else:
+        await cb.answer("♻️ Дубликат")
+        await cb.message.answer("♻️ Такой вопрос уже есть в базе.")
 
 
 @router.callback_query(F.data.startswith("a:"))
@@ -574,7 +945,6 @@ async def noop(cb: CallbackQuery):
     await cb.answer()
 
 
-# ---------------- Безопасность и API для Mini App ----------------
 def verify_telegram_webapp(init_data: str) -> dict | None:
     if not init_data:
         return None
@@ -595,7 +965,8 @@ def get_api_user(request: web.Request) -> dict | None:
     user = verify_telegram_webapp(init_data)
     if user and "id" in user:
         full_name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
-        ensure_user(user["id"], full_name)
+        username = user.get("username", "")
+        ensure_user(int(user["id"]), full_name, username)
         return user
     return None
 
@@ -609,8 +980,9 @@ async def api_dashboard(request: web.Request):
     user = get_api_user(request)
     if not user:
         return web.json_response({"error": "Доступ запрещён"}, status=401)
-    uid = user["id"]
+    uid = int(user["id"])
     now_ts = int(time.time())
+    bot_info = await request.app["bot"].get_me()
 
     total = db.execute("SELECT COUNT(*) c FROM questions WHERE user_id=?", (uid,)).fetchone()["c"]
     due = db.execute("SELECT COUNT(*) c FROM questions WHERE user_id=? AND due<=?", (uid, now_ts)).fetchone()["c"]
@@ -630,14 +1002,27 @@ async def api_dashboard(request: web.Request):
     ).fetchall():
         boxes[str(r["box"])] = r["c"]
 
+    u_row = db.execute("SELECT referral_count FROM users WHERE user_id=?", (uid,)).fetchone()
+    refs = u_row["referral_count"] if u_row else 0
+    leaderboard = build_leaderboard(20)
+    admin_users = build_admin_users_list() if is_admin(uid) else []
+
     return web.json_response({
         "user": {
             "id": uid,
-            "name": f"{user.get('first_name', '')} {user.get('last_name', '')}".strip(),
+            "name": f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or f"Пользователь {uid}",
             "username": user.get("username", ""),
+            "is_admin": is_admin(uid),
             "streak": streak_now(uid),
             "today_done": day_count(uid),
             "daily_limit": DAILY_LIMIT,
+            "own_questions": personal_count(uid),
+            "personal_limit": personal_limit(uid),
+            "personal_remaining": personal_remaining(uid),
+            "referral_count": refs,
+            "referral_bonus": REFERRAL_BONUS_LIMIT,
+            "referral_link": get_referral_link(bot_info.username, uid),
+            "score": compute_user_score(uid),
         },
         "stats": {
             "total": total,
@@ -647,6 +1032,9 @@ async def api_dashboard(request: web.Request):
             "attempts": agg["att"],
             "boxes": boxes,
         },
+        "json_example": JSON_FORMAT_EXAMPLE,
+        "leaderboard": leaderboard,
+        "admin_users": admin_users,
     })
 
 
@@ -654,7 +1042,7 @@ async def api_next_question(request: web.Request):
     user = get_api_user(request)
     if not user:
         return web.json_response({"error": "Доступ запрещён"}, status=401)
-    uid = user["id"]
+    uid = int(user["id"])
     mode = request.query.get("mode", "due")
     exclude_raw = request.query.get("exclude", "")
     exclude = [int(x) for x in exclude_raw.split(",") if x.isdigit()]
@@ -672,6 +1060,7 @@ async def api_next_question(request: web.Request):
             "id": q["id"],
             "text": q["question"],
             "box": q["box"],
+            "scope": q["scope"],
             "options": [{"idx": idx, "text": txt} for idx, txt in indexed_opts],
         }
     })
@@ -681,7 +1070,7 @@ async def api_submit_answer(request: web.Request):
     user = get_api_user(request)
     if not user:
         return web.json_response({"error": "Доступ запрещён"}, status=401)
-    uid = user["id"]
+    uid = int(user["id"])
     body = await request.json()
     qid = int(body.get("question_id", 0))
     chosen_idx = int(body.get("option_idx", -1))
@@ -700,6 +1089,7 @@ async def api_submit_answer(request: web.Request):
         "old_box": res["old_box"],
         "new_box": res["new_box"],
         "streak": streak_now(uid),
+        "score": compute_user_score(uid),
     })
 
 
@@ -707,25 +1097,63 @@ async def api_import_json(request: web.Request):
     user = get_api_user(request)
     if not user:
         return web.json_response({"error": "Доступ запрещён"}, status=401)
-    uid = user["id"]
+    uid = int(user["id"])
     body = await request.json()
     raw_text = body.get("json_text", "")
+    scope = body.get("scope", "personal")
+
     try:
         data = json.loads(decode_bytes(raw_text.encode("utf-8")))
         items, errors = parse_items(data)
     except Exception as e:
         return web.json_response({"error": str(e)}, status=400)
 
-    added, dup = add_questions(uid, items)
+    res = add_questions_with_scope(uid, items, scope)
     return web.json_response({
-        "added": added,
-        "dup": dup,
+        "added": res["added"],
+        "dup": res["dup"],
+        "skipped_limit": res["skipped_limit"],
+        "scope": res["scope"],
         "errors_count": len(errors),
         "errors": errors[:5],
+        "own_questions": personal_count(uid),
+        "personal_limit": personal_limit(uid),
     })
 
 
-# ---------------- Планировщик и запуск ----------------
+async def api_add_plain(request: web.Request):
+    user = get_api_user(request)
+    if not user:
+        return web.json_response({"error": "Доступ запрещён"}, status=401)
+    uid = int(user["id"])
+    body = await request.json()
+    question = norm(body.get("question", ""))
+    raw_options = body.get("options", [])
+    correct_idx = int(body.get("correct_idx", -1))
+    scope = body.get("scope", "personal")
+
+    options = [norm(o) for o in raw_options if norm(o)]
+    if not question:
+        return web.json_response({"error": "Введите текст вопроса"}, status=400)
+    if not 2 <= len(options) <= 6:
+        return web.json_response({"error": "Нужно от 2 до 6 вариантов ответа"}, status=400)
+    if len({o.lower() for o in options}) < len(options):
+        return web.json_response({"error": "Варианты ответа не должны повторяться"}, status=400)
+    if not (0 <= correct_idx < len(options)):
+        return web.json_response({"error": "Выберите правильный вариант ответа"}, status=400)
+
+    res = add_questions_with_scope(uid, [(question, options, correct_idx)], scope)
+    return web.json_response({
+        "added": res["added"],
+        "dup": res["dup"],
+        "skipped_limit": res["skipped_limit"],
+        "scope": res["scope"],
+        "correct_text": options[correct_idx],
+        "own_questions": personal_count(uid),
+        "personal_limit": personal_limit(uid),
+    })
+
+
 async def scheduler(bot: Bot):
     while True:
         try:
@@ -756,11 +1184,13 @@ async def main():
     dp.include_router(router)
 
     app = web.Application()
+    app["bot"] = bot
     app.router.add_get("/", handle_index)
     app.router.add_get("/api/dashboard", api_dashboard)
     app.router.add_get("/api/question", api_next_question)
     app.router.add_post("/api/answer", api_submit_answer)
     app.router.add_post("/api/import", api_import_json)
+    app.router.add_post("/api/add-plain", api_add_plain)
 
     runner = web.AppRunner(app)
     await runner.setup()
@@ -774,5 +1204,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-  
