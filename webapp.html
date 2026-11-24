@@ -28,27 +28,14 @@
     }
 
     .toast-wrap {
-      position: fixed;
-      top: 14px;
-      left: 16px;
-      right: 16px;
-      z-index: 999;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      pointer-events: none;
+      position: fixed; top: 14px; left: 16px; right: 16px; z-index: 999;
+      display: flex; flex-direction: column; gap: 8px; pointer-events: none;
     }
     .toast {
-      background: rgba(15, 23, 42, 0.96);
-      border: 1px solid var(--card-border);
-      border-left: 4px solid var(--accent);
-      color: var(--text);
-      padding: 12px 14px;
-      border-radius: 14px;
-      font-size: 13px;
-      font-weight: 600;
-      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
-      animation: toastIn 0.25s ease;
+      background: rgba(15, 23, 42, 0.96); border: 1px solid var(--card-border);
+      border-left: 4px solid var(--accent); color: var(--text); padding: 12px 14px;
+      border-radius: 14px; font-size: 13px; font-weight: 600;
+      box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45); animation: toastIn 0.25s ease;
     }
     .toast.success { border-left-color: var(--success); }
     .toast.error { border-left-color: var(--danger); }
@@ -58,62 +45,43 @@
     }
 
     .modal-backdrop {
-      position: fixed;
-      inset: 0;
-      background: rgba(2, 6, 23, 0.72);
-      backdrop-filter: blur(6px);
-      display: none;
-      align-items: center;
-      justify-content: center;
-      padding: 20px;
-      z-index: 900;
+      position: fixed; inset: 0; background: rgba(2, 6, 23, 0.72);
+      backdrop-filter: blur(6px); display: none; align-items: center;
+      justify-content: center; padding: 20px; z-index: 900;
     }
     .modal-backdrop.open { display: flex; animation: fadeIn 0.2s ease; }
     .modal-box {
-      width: 100%;
-      max-width: 400px;
-      background: #1e293b;
-      border: 1px solid var(--card-border);
-      border-radius: 20px;
-      padding: 20px;
-      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
-      text-align: center;
+      width: 100%; max-width: 400px; background: #1e293b; border: 1px solid var(--card-border);
+      border-radius: 20px; padding: 20px; box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6); text-align: center;
     }
     .modal-title { font-size: 18px; font-weight: 800; margin-bottom: 8px; }
     .modal-desc { font-size: 13px; color: var(--hint); line-height: 1.5; margin-bottom: 16px; white-space: pre-line; }
 
+    .sub-gate {
+      position: fixed; inset: 0; background: radial-gradient(circle at top, #1e1b4b 0%, #090d16 70%);
+      z-index: 800; display: none; flex-direction: column; justify-content: space-between;
+      padding: 24px 18px 28px; overflow-y: auto;
+    }
+    .sub-gate.active { display: flex; }
+
     .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; gap: 8px; }
     .header h1 { font-size: 20px; font-weight: 800; letter-spacing: -0.3px; }
     .pill {
-      background: rgba(245, 158, 11, 0.16);
-      border: 1px solid rgba(245, 158, 11, 0.35);
-      color: var(--warning);
-      padding: 6px 11px;
-      border-radius: 999px;
-      font-weight: 700;
-      font-size: 12px;
-      white-space: nowrap;
+      background: rgba(245, 158, 11, 0.16); border: 1px solid rgba(245, 158, 11, 0.35);
+      color: var(--warning); padding: 6px 11px; border-radius: 999px; font-weight: 700; font-size: 12px; white-space: nowrap;
     }
 
     .card {
-      background: var(--card);
-      backdrop-filter: blur(12px);
-      border: 1px solid var(--card-border);
-      border-radius: 18px;
-      padding: 16px;
-      margin-bottom: 14px;
+      background: var(--card); backdrop-filter: blur(12px);
+      border: 1px solid var(--card-border); border-radius: 18px; padding: 16px; margin-bottom: 14px;
     }
     .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px; }
     .stat-box {
-      background: var(--card);
-      border: 1px solid var(--card-border);
-      border-radius: 18px;
-      padding: 14px;
-      text-align: center;
+      background: var(--card); border: 1px solid var(--card-border);
+      border-radius: 18px; padding: 14px; text-align: center;
     }
     .stat-val { font-size: 24px; font-weight: 800; color: #60a5fa; }
     .stat-lbl { font-size: 12px; color: var(--hint); margin-top: 4px; }
-
     .boxes-title { font-size: 14px; font-weight: 700; margin-bottom: 12px; display: flex; justify-content: space-between; }
     .box-row { display: flex; align-items: center; margin-bottom: 9px; font-size: 12px; }
     .box-label { width: 96px; color: var(--hint); font-weight: 600; }
@@ -122,15 +90,9 @@
     .box-count { width: 28px; text-align: right; font-weight: 700; }
 
     .btn {
-      width: 100%;
-      padding: 13px 14px;
-      border: none;
-      border-radius: 14px;
-      font-size: 14px;
-      font-weight: 700;
-      cursor: pointer;
-      transition: transform 0.1s ease, opacity 0.2s ease;
-      margin-bottom: 10px;
+      width: 100%; padding: 13px 14px; border: none; border-radius: 14px;
+      font-size: 14px; font-weight: 700; cursor: pointer; transition: transform 0.1s ease;
+      margin-bottom: 10px; display: block; text-align: center; text-decoration: none;
     }
     .btn:active { transform: scale(0.98); }
     .btn-primary { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; }
@@ -140,143 +102,65 @@
     .btn-ghost { background: rgba(148, 163, 184, 0.14); color: var(--text); }
 
     .seg-tabs {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 8px;
-      background: rgba(15, 23, 42, 0.75);
-      padding: 5px;
-      border-radius: 14px;
-      margin-bottom: 12px;
-      border: 1px solid var(--card-border);
+      display: grid; grid-template-columns: 1fr 1fr; gap: 8px; background: rgba(15, 23, 42, 0.75);
+      padding: 5px; border-radius: 14px; margin-bottom: 12px; border: 1px solid var(--card-border);
     }
     .seg-btn {
-      padding: 10px;
-      border: none;
-      border-radius: 10px;
-      background: transparent;
-      color: var(--hint);
-      font-weight: 700;
-      font-size: 13px;
-      cursor: pointer;
+      padding: 10px; border: none; border-radius: 10px; background: transparent;
+      color: var(--hint); font-weight: 700; font-size: 13px; cursor: pointer;
     }
-    .seg-btn.active {
-      background: linear-gradient(135deg, var(--accent), var(--accent-2));
-      color: #fff;
-    }
+    .seg-btn.active { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; }
 
     .q-header { display: flex; justify-content: space-between; font-size: 12px; color: var(--hint); margin-bottom: 10px; }
     .q-text { font-size: 18px; font-weight: 700; line-height: 1.45; margin-bottom: 16px; }
     .opt-btn {
-      width: 100%;
-      text-align: left;
-      padding: 13px 15px;
-      margin-bottom: 9px;
-      border-radius: 14px;
-      border: 1.5px solid var(--card-border);
-      background: rgba(15, 23, 42, 0.65);
-      color: var(--text);
-      font-size: 14px;
-      font-weight: 500;
-      cursor: pointer;
-      transition: all 0.18s ease;
+      width: 100%; text-align: left; padding: 13px 15px; margin-bottom: 9px; border-radius: 14px;
+      border: 1.5px solid var(--card-border); background: rgba(15, 23, 42, 0.65); color: var(--text);
+      font-size: 14px; font-weight: 500; cursor: pointer; transition: all 0.18s ease;
     }
     .opt-btn.correct { border-color: var(--success); background: rgba(16, 185, 129, 0.2); color: #6ee7b7; font-weight: 700; }
     .opt-btn.wrong { border-color: var(--danger); background: rgba(239, 68, 68, 0.2); color: #fca5a5; }
 
     .file-drop {
-      display: block;
-      border: 1.5px dashed rgba(96, 165, 250, 0.5);
-      background: rgba(15, 23, 42, 0.55);
-      border-radius: 14px;
-      padding: 13px;
-      text-align: center;
-      margin-bottom: 8px;
-      cursor: pointer;
-      font-size: 13px;
-      color: #93c5fd;
-      font-weight: 600;
+      display: block; border: 1.5px dashed rgba(96, 165, 250, 0.5); background: rgba(15, 23, 42, 0.55);
+      border-radius: 14px; padding: 13px; text-align: center; margin-bottom: 8px;
+      cursor: pointer; font-size: 13px; color: #93c5fd; font-weight: 600;
     }
     .file-drop input { display: none; }
 
-    textarea {
-      width: 100%;
-      height: 135px;
-      background: rgba(15, 23, 42, 0.75);
-      color: var(--text);
-      border: 1px solid var(--card-border);
-      border-radius: 14px;
-      padding: 12px;
-      font-size: 13px;
-      line-height: 1.45;
-      margin-bottom: 10px;
-      resize: vertical;
+    input[type="text"], textarea {
+      width: 100%; background: rgba(15, 23, 42, 0.75); color: var(--text);
+      border: 1px solid var(--card-border); border-radius: 12px; padding: 10px 12px; font-size: 13px; margin-bottom: 10px;
     }
+    textarea { height: 125px; line-height: 1.45; resize: vertical; }
 
     .code-box {
-      background: rgba(2, 6, 23, 0.85);
-      border: 1px solid var(--card-border);
-      border-radius: 12px;
-      padding: 10px 12px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      font-size: 11px;
-      color: #bae6fd;
-      white-space: pre-wrap;
-      word-break: break-all;
-      margin-bottom: 10px;
+      background: rgba(2, 6, 23, 0.85); border: 1px solid var(--card-border); border-radius: 12px;
+      padding: 10px 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+      color: #bae6fd; white-space: pre-wrap; word-break: break-all; margin-bottom: 10px;
     }
 
     .list-item {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 12px;
-      border-radius: 14px;
-      background: rgba(15, 23, 42, 0.65);
-      border: 1px solid var(--card-border);
-      margin-bottom: 10px;
-      gap: 10px;
+      display: flex; justify-content: space-between; align-items: center; padding: 12px;
+      border-radius: 14px; background: rgba(15, 23, 42, 0.65); border: 1px solid var(--card-border);
+      margin-bottom: 10px; gap: 10px;
     }
     .list-item.clickable { cursor: pointer; }
-    .list-item.clickable:active { transform: scale(0.99); }
 
     .avatar {
-      width: 64px;
-      height: 64px;
-      border-radius: 50%;
-      background: linear-gradient(135deg, var(--accent), var(--accent-2));
-      color: #fff;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 26px;
-      font-weight: 800;
-      margin: 0 auto 10px;
+      width: 64px; height: 64px; border-radius: 50%; background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      color: #fff; display: flex; align-items: center; justify-content: center;
+      font-size: 26px; font-weight: 800; margin: 0 auto 10px;
     }
 
     .nav {
-      position: fixed;
-      bottom: 0;
-      left: 0;
-      right: 0;
-      background: rgba(15, 23, 42, 0.95);
-      backdrop-filter: blur(14px);
-      display: flex;
-      justify-content: space-around;
-      padding: 10px 0 18px;
-      border-top: 1px solid var(--card-border);
-      z-index: 500;
+      position: fixed; bottom: 0; left: 0; right: 0; background: rgba(15, 23, 42, 0.95);
+      backdrop-filter: blur(14px); display: flex; justify-content: space-around;
+      padding: 10px 0 18px; border-top: 1px solid var(--card-border); z-index: 500;
     }
     .nav-item {
-      background: none;
-      border: none;
-      color: var(--hint);
-      font-size: 10px;
-      font-weight: 600;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 3px;
-      cursor: pointer;
+      background: none; border: none; color: var(--hint); font-size: 10px; font-weight: 600;
+      display: flex; flex-direction: column; align-items: center; gap: 3px; cursor: pointer;
     }
     .nav-item.active { color: #60a5fa; }
     .nav-icon { font-size: 18px; }
@@ -287,7 +171,6 @@
   </style>
 </head>
 <body>
-
   <div id="toast-wrap" class="toast-wrap"></div>
 
   <div id="popup-modal" class="modal-backdrop" onclick="if(event.target===this)closePopup()">
@@ -295,6 +178,27 @@
       <div class="modal-title" id="popup-title">Уведомление</div>
       <div class="modal-desc" id="popup-desc"></div>
       <button class="btn btn-primary" style="margin-bottom:0;" onclick="closePopup()">Понятно</button>
+    </div>
+  </div>
+
+  <!-- Блокировка до подписки: при нажатии на канал идёт проверка каждую секунду в течение 10 секунд -->
+  <div id="sub-gate" class="sub-gate">
+    <div>
+      <div class="card" style="text-align:center; background:rgba(30,41,59,0.95);">
+        <div style="font-size:40px; margin-bottom:8px;">🔒</div>
+        <h2 style="font-size:20px; font-weight:800; margin-bottom:8px;">Подпишитесь на канал</h2>
+        <p style="font-size:13px; color:var(--hint); line-height:1.5;">
+          Если вы подпишитесь на канал, доступ откроется автоматически. Нажмите на ссылку ниже — проверка идёт каждую секунду (10 сек.).
+        </p>
+      </div>
+      <div id="sub-gate-channels"></div>
+    </div>
+
+    <div>
+      <div id="sub-poll-status" style="text-align:center; font-size:13px; color:#93c5fd; margin-bottom:10px; font-weight:600;"></div>
+      <button class="btn btn-primary" style="margin-bottom:0;" onclick="triggerChannelWatch()">
+        📢 Перейти к каналу и начать проверку (10 сек.)
+      </button>
     </div>
   </div>
 
@@ -311,19 +215,19 @@
         <div class="stat-lbl">К повторению</div>
       </div>
       <div class="stat-box">
-        <div class="stat-val" style="color: var(--success)" id="stat-total">0</div>
-        <div class="stat-lbl">Всего вопросов</div>
+        <div class="stat-val" style="color: var(--success)" id="stat-score">0</div>
+        <div class="stat-lbl">Очки (+10 / -5)</div>
       </div>
     </div>
 
     <button class="btn btn-primary" onclick="startQuiz('due')">🧠 Начать повторение</button>
     <button class="btn btn-danger" onclick="startQuiz('wrong')">❌ Работа над ошибками (<span id="stat-wrong">0</span>)</button>
-    <button class="btn btn-ghost" onclick="openPopup('Метод Эббингауза и Лейтнера', 'Карточки переходят между 6 ящиками.\nИнтервалы: 10 мин → 1 дн. → 3 дн. → 7 дн. → 16 дн. → 35 дн.\nПри ошибке карточка возвращается в Ящик 0.')">💡 Как работает система?</button>
+    <button class="btn btn-ghost" onclick="openPopup('Правила очков и Лейтнера', '• Верный ответ: +10 очков\n• Ошибка: -5 очков (не ниже 0)\n• Интервалы: 10м → 1д → 3д → 7д → 16д → 35д')">💡 Правила и интервалы</button>
 
     <div class="card">
       <div class="boxes-title">
         <span>📦 Ящики Лейтнера</span>
-        <span style="color: var(--hint); font-size: 12px;">0 → 5</span>
+        <span style="color: var(--hint); font-size: 12px;">Всего: <b id="stat-total">0</b></span>
       </div>
       <div id="leitner-boxes"></div>
     </div>
@@ -368,10 +272,13 @@
         <b id="user-limit-text">0 / 30</b>
       </div>
       <p style="color:var(--hint); font-size:12px; margin-bottom:8px;">
-        Базовый лимит — 30 тестов. За каждого приглашённого друга по реферальной ссылке добавляется <b>+50</b> тестов.
+        Лимит — 30 тестов. За каждого приглашённого друга — <b>+50</b> тестов.
       </p>
       <div class="code-box" id="add-ref-link">...</div>
-      <button class="btn btn-ghost" style="margin-bottom:0; padding:10px;" onclick="copyRefLink()">📋 Скопировать реферальную ссылку</button>
+      <div class="grid-2" style="margin-bottom:0; gap:8px;">
+        <button class="btn btn-ghost" style="margin-bottom:0; padding:10px;" onclick="copyRefLink()">📋 Копировать</button>
+        <button class="btn btn-primary" style="margin-bottom:0; padding:10px;" onclick="shareInvite()">📤 Друзьям</button>
+      </div>
     </div>
 
     <div class="seg-tabs">
@@ -381,7 +288,7 @@
 
     <div id="add-plain-box" class="card">
       <p style="font-size: 13px; color: var(--hint); margin-bottom: 10px; line-height: 1.5;">
-        1-я строка — <b>вопрос</b>, затем с новой строки (Enter) каждый <b>вариант ответа</b>. После нажатия кнопки ниже выберите правильный вариант:
+        1-я строка — <b>вопрос</b>, затем с новой строки (Enter) каждый <b>вариант ответа</b>. Нажмите кнопку и выберите правильный вариант:
       </p>
       <textarea id="plain-input" placeholder="Столица Франции?&#10;Париж&#10;Рим&#10;Мадрид&#10;Берлин"></textarea>
       <button class="btn btn-success" onclick="buildPlainQuiz()">Создать тест и выбрать ответ</button>
@@ -443,36 +350,51 @@
       </div>
       <div class="stat-box">
         <div class="stat-val" id="prof-score">0</div>
-        <div class="stat-lbl">Очки рейтинга</div>
+        <div class="stat-lbl">Очки (+10 / -5)</div>
       </div>
     </div>
 
     <div class="card">
-      <div style="font-weight:700; font-size:14px; margin-bottom:8px;">🎁 Рефералы и лимит тестов</div>
+      <div style="font-weight:700; font-size:14px; margin-bottom:8px;">🎁 Пригласить друзей (+50 тестов)</div>
       <p style="font-size:13px; color:var(--hint); margin-bottom:8px;">
-        Приглашено друзей: <b id="prof-refs" style="color:var(--text);">0</b> • Личные тесты: <b id="prof-own-lim" style="color:var(--text);">0/30</b>
+        Приглашено: <b id="prof-refs" style="color:var(--text);">0</b> • Личные: <b id="prof-own-lim" style="color:var(--text);">0/30</b>
       </p>
       <div class="code-box" id="prof-ref-link">...</div>
-      <button class="btn btn-ghost" style="margin-bottom:0; padding:10px;" onclick="copyRefLink()">📋 Скопировать ссылку (+50 за друга)</button>
+      <div class="grid-2" style="margin-bottom:0; gap:8px;">
+        <button class="btn btn-ghost" style="margin-bottom:0; padding:10px;" onclick="copyRefLink()">📋 Копировать</button>
+        <button class="btn btn-primary" style="margin-bottom:0; padding:10px;" onclick="shareInvite()">📤 Отправить друзьям</button>
+      </div>
     </div>
 
     <div id="admin-profile-panel" style="display:none;">
       <div class="card">
-        <div style="font-weight:800; font-size:15px; margin-bottom:10px;">👑 Панель администратора: добавление тестов</div>
+        <div style="font-weight:800; font-size:15px; margin-bottom:10px;">👑 Добавление тестов администратором</div>
         <button class="btn btn-primary" onclick="jumpToAdminAdd('personal')">👤 Добавить тест для себя</button>
         <button class="btn btn-warning" onclick="jumpToAdminAdd('global')">🌍 Добавить тест для всех</button>
       </div>
 
       <div class="card">
+        <div style="font-weight:800; font-size:15px; margin-bottom:8px;">📢 Обязательные каналы</div>
+        <input type="hidden" id="edit-ch-id" value="" />
+        <input type="text" id="ch-title-input" placeholder="Название канала" />
+        <input type="text" id="ch-ref-input" placeholder="@channel или https://t.me/channel или -100..." />
+        <input type="text" id="ch-url-input" placeholder="Ссылка https://t.me/channel (если выше ID)" />
+        <div class="grid-2" style="margin-bottom:6px; gap:8px;">
+          <button class="btn btn-success" style="margin-bottom:0;" onclick="saveChannel()">💾 Сохранить</button>
+          <button class="btn btn-ghost" style="margin-bottom:0;" onclick="resetChannelForm()">✖ Очистить</button>
+        </div>
+        <div id="admin-channels-list" style="margin-top:10px;"></div>
+      </div>
+
+      <div class="card">
         <div style="font-weight:800; font-size:15px; margin-bottom:10px;">
-          👥 Пользователи и их прогресс (нажмите для перехода в чат)
+          👥 Пользователи и прогресс (нажмите для перехода в чат)
         </div>
         <div id="admin-users-list"></div>
       </div>
     </div>
   </div>
 
-  <!-- НИЖНЕЕ МЕНЮ -->
   <nav class="nav">
     <button class="nav-item active" onclick="switchTab('home', this)">
       <span class="nav-icon">🏠</span><span>Главная</span>
@@ -503,6 +425,8 @@
     let draftPlain = null;
     let addScope = 'personal';
     let dashData = null;
+    let subPollTimer = null;
+    let currentMissingChannels = [];
 
     const boxColors = ['#ef4444', '#f97316', '#f59e0b', '#3b82f6', '#8b5cf6', '#10b981'];
     const boxNames = ['Ящик 0 (10м)', 'Ящик 1 (1д)', 'Ящик 2 (3д)', 'Ящик 3 (7д)', 'Ящик 4 (16д)', 'Ящик 5 (35д)'];
@@ -531,18 +455,81 @@
       document.getElementById('popup-modal').classList.remove('open');
     }
 
+    function renderSubGate(subObj) {
+      const gate = document.getElementById('sub-gate');
+      if (!subObj || subObj.ok) {
+        gate.classList.remove('active');
+        if (subPollTimer) {
+          clearInterval(subPollTimer);
+          subPollTimer = null;
+        }
+        return false;
+      }
+
+      currentMissingChannels = subObj.missing_channels || [];
+      const listEl = document.getElementById('sub-gate-channels');
+      listEl.innerHTML = '';
+      currentMissingChannels.forEach(ch => {
+        listEl.innerHTML += `
+          <a class="btn btn-primary" href="${ch.url}" target="_blank" onclick="start10SecWatch()">
+            📢 Подписаться на «${ch.title}»
+          </a>`;
+      });
+
+      gate.classList.add('active');
+      return true;
+    }
+
+    async function start10SecWatch() {
+      await api('/api/sub-watch/start', 'POST', {});
+      const statusEl = document.getElementById('sub-poll-status');
+      statusEl.textContent = '⏳ Проверяем подписку каждую секунду (10 сек.)...';
+
+      if (subPollTimer) clearInterval(subPollTimer);
+
+      const tick = async () => {
+        const res = await api('/api/check-sub');
+        if (res && res.ok) {
+          clearInterval(subPollTimer);
+          subPollTimer = null;
+          statusEl.textContent = '';
+          document.getElementById('sub-gate').classList.remove('active');
+          showToast('Подписка подтверждена! Доступ открыт.', 'success');
+          await loadDashboard();
+          return;
+        }
+        if (res && res.timed_out) {
+          clearInterval(subPollTimer);
+          subPollTimer = null;
+          statusEl.textContent = '⏱ Вы не подписались за 10 секунд.';
+          showToast('Вы не подписались за 10 секунд.', 'error');
+        } else if (res) {
+          statusEl.textContent = `⏳ Проверяем каждую секунду... осталось ${res.remaining_sec} сек.`;
+        }
+      };
+
+      await tick();
+      subPollTimer = setInterval(tick, 1000);
+    }
+
+    function triggerChannelWatch() {
+      if (currentMissingChannels.length > 0 && currentMissingChannels[0].url) {
+        window.open(currentMissingChannels[0].url, '_blank');
+      }
+      start10SecWatch();
+    }
+
     function setScope(scope) {
       addScope = scope;
       const isGlobal = scope === 'global';
       document.getElementById('scope-personal-btn').classList.toggle('active', !isGlobal);
       document.getElementById('scope-global-btn').classList.toggle('active', isGlobal);
-      showToast(isGlobal ? 'Выбрано: Для всех пользователей' : 'Выбрано: Для себя', 'info');
+      showToast(isGlobal ? 'Выбрано: Для всех' : 'Выбрано: Для себя', 'info');
     }
 
     function jumpToAdminAdd(scope) {
       setScope(scope);
-      const navBtn = document.querySelectorAll('.nav-item')[2];
-      switchTab('add', navBtn);
+      switchTab('add', document.querySelectorAll('.nav-item')[2]);
     }
 
     function setAddMode(mode) {
@@ -559,29 +546,34 @@
       if (navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(link).catch(() => {});
       }
-      showToast('Реферальная ссылка скопирована!', 'success');
+      showToast('Ссылка скопирована!', 'success');
+    }
+
+    function shareInvite() {
+      const shareUrl = dashData?.user?.share_url;
+      if (!shareUrl) return;
+      if (tg.openTelegramLink) tg.openTelegramLink(shareUrl);
+      else window.open(shareUrl, '_blank');
     }
 
     function openUserChat(uid, username) {
       const url = username ? `https://t.me/${username}` : `tg://user?id=${uid}`;
-      if (tg.openTelegramLink && username) {
-        tg.openTelegramLink(url);
-      } else {
-        window.open(url, '_blank');
-      }
+      if (tg.openTelegramLink && username) tg.openTelegramLink(url);
+      else window.open(url, '_blank');
     }
 
     async function api(path, method = 'GET', body = null) {
       const opts = {
         method,
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Telegram-Init-Data': tg.initData
-        }
+        headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': tg.initData }
       };
       if (body) opts.body = JSON.stringify(body);
       const res = await fetch(path, opts);
-      return res.json();
+      const data = await res.json();
+      if (data && data.sub_required) {
+        renderSubGate({ ok: false, missing_channels: data.missing_channels || [] });
+      }
+      return data;
     }
 
     function switchTab(name, el) {
@@ -591,9 +583,7 @@
         document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
         el.classList.add('active');
       }
-      if (name === 'home' || name === 'profile' || name === 'rating' || name === 'add') {
-        loadDashboard();
-      }
+      loadDashboard();
     }
 
     async function loadDashboard() {
@@ -601,9 +591,12 @@
       if (data.error) return showToast(data.error, 'error');
       dashData = data;
 
+      if (renderSubGate(data.subscription)) return;
+
       const { user, stats } = data;
       document.getElementById('streak-badge').textContent = `🔥 ${user.streak} дн.`;
       document.getElementById('stat-due').textContent = stats.due;
+      document.getElementById('stat-score').textContent = user.score;
       document.getElementById('stat-total').textContent = stats.total;
       document.getElementById('stat-wrong').textContent = stats.wrong;
 
@@ -619,14 +612,10 @@
       document.getElementById('admin-profile-panel').style.display = user.is_admin ? 'block' : 'none';
       document.getElementById('user-limit-card').style.display = user.is_admin ? 'none' : 'block';
 
-      document.getElementById('limit-pill').textContent = user.is_admin
-        ? '∞ Лимит'
-        : `${user.own_questions} / ${user.personal_limit}`;
+      document.getElementById('limit-pill').textContent = user.is_admin ? '∞ Лимит' : `${user.own_questions} / ${user.personal_limit}`;
       document.getElementById('user-limit-text').textContent = `${user.own_questions} / ${user.personal_limit}`;
       document.getElementById('prof-refs').textContent = user.referral_count;
-      document.getElementById('prof-own-lim').textContent = user.is_admin
-        ? `${user.own_questions} / ∞`
-        : `${user.own_questions} / ${user.personal_limit}`;
+      document.getElementById('prof-own-lim').textContent = user.is_admin ? `${user.own_questions} / ∞` : `${user.own_questions} / ${user.personal_limit}`;
 
       document.getElementById('add-ref-link').textContent = user.referral_link;
       document.getElementById('prof-ref-link').textContent = user.referral_link;
@@ -641,9 +630,7 @@
         boxContainer.innerHTML += `
           <div class="box-row">
             <div class="box-label">${boxNames[i]}</div>
-            <div class="box-bar-bg">
-              <div class="box-bar-fill" style="width: ${pct}%; background: ${boxColors[i]};"></div>
-            </div>
+            <div class="box-bar-bg"><div class="box-bar-fill" style="width:${pct}%; background:${boxColors[i]};"></div></div>
             <div class="box-count">${cnt}</div>
           </div>`;
       }
@@ -664,6 +651,7 @@
       });
 
       if (user.is_admin) {
+        renderAdminChannels(data.subscription?.all_channels || []);
         const adminContainer = document.getElementById('admin-users-list');
         adminContainer.innerHTML = '';
         (data.admin_users || []).forEach(u => {
@@ -683,12 +671,66 @@
                 </div>
                 <div style="font-size:10px; color:var(--hint); margin-top:2px;">${boxSummary}</div>
               </div>
-              <span class="pill" style="background:rgba(59,130,246,0.18); border-color:rgba(59,130,246,0.4); color:#93c5fd;">
-                Чат ➔
-              </span>
+              <span class="pill" style="background:rgba(59,130,246,0.18); border-color:rgba(59,130,246,0.4); color:#93c5fd;">Чат ➔</span>
             </div>`;
         });
       }
+    }
+
+    function renderAdminChannels(channels) {
+      const wrap = document.getElementById('admin-channels-list');
+      wrap.innerHTML = '';
+      if (!channels.length) {
+        wrap.innerHTML = '<p style="font-size:12px; color:var(--hint);">Обязательных каналов пока нет.</p>';
+        return;
+      }
+      channels.forEach(ch => {
+        wrap.innerHTML += `
+          <div class="list-item">
+            <div>
+              <div style="font-weight:700; font-size:13px;">${ch.title}</div>
+              <div style="font-size:11px; color:var(--hint);">${ch.chat_ref} • ${ch.url}</div>
+            </div>
+            <div style="display:flex; gap:6px;">
+              <button class="btn btn-ghost" style="margin:0; padding:7px 10px; font-size:12px;" onclick='editChannel(${JSON.stringify(ch)})'>✏️</button>
+              <button class="btn btn-danger" style="margin:0; padding:7px 10px; font-size:12px;" onclick="deleteChannel(${ch.id})">🗑</button>
+            </div>
+          </div>`;
+      });
+    }
+
+    function editChannel(ch) {
+      document.getElementById('edit-ch-id').value = ch.id;
+      document.getElementById('ch-title-input').value = ch.title || '';
+      document.getElementById('ch-ref-input').value = ch.chat_ref || '';
+      document.getElementById('ch-url-input').value = ch.url || '';
+      showToast('Канал загружен для редактирования', 'info');
+    }
+
+    function resetChannelForm() {
+      document.getElementById('edit-ch-id').value = '';
+      document.getElementById('ch-title-input').value = '';
+      document.getElementById('ch-ref-input').value = '';
+      document.getElementById('ch-url-input').value = '';
+    }
+
+    async function saveChannel() {
+      const id = document.getElementById('edit-ch-id').value;
+      const title = document.getElementById('ch-title-input').value.trim();
+      const chat_ref = document.getElementById('ch-ref-input').value.trim();
+      const url = document.getElementById('ch-url-input').value.trim();
+      const res = await api('/api/channels/save', 'POST', { id: id ? Number(id) : null, title, chat_ref, url });
+      if (res.error) return showToast(res.error, 'error');
+      resetChannelForm();
+      renderAdminChannels(res.channels || []);
+      showToast('Канал сохранён!', 'success');
+    }
+
+    async function deleteChannel(id) {
+      const res = await api('/api/channels/delete', 'POST', { id });
+      if (res.error) return showToast(res.error, 'error');
+      renderAdminChannels(res.channels || []);
+      showToast('Канал удалён', 'info');
     }
 
     function startQuiz(mode) {
@@ -711,10 +753,11 @@
       document.getElementById('q-options').innerHTML = '';
 
       const data = await api(`/api/question?mode=${currentMode}&exclude=${seenIds.join(',')}`);
+      if (data.sub_required) return;
       if (!data.question) {
         document.getElementById('q-text').textContent = '🎉 Вопросы на сейчас закончились!';
         document.getElementById('q-box-badge').textContent = 'Готово';
-        showToast('Все доступные вопросы в этом режиме пройдены!', 'success');
+        showToast('Все доступные вопросы пройдены!', 'success');
         return;
       }
 
@@ -738,10 +781,8 @@
       if (answered) return;
       answered = true;
 
-      const res = await api('/api/answer', 'POST', {
-        question_id: currentQuestion.id,
-        option_idx: optIdx
-      });
+      const res = await api('/api/answer', 'POST', { question_id: currentQuestion.id, option_idx: optIdx });
+      if (res.sub_required) return;
 
       const buttons = document.querySelectorAll('#q-options .opt-btn');
       currentQuestion.options.forEach((opt, i) => {
@@ -749,14 +790,17 @@
         else if (opt.idx === optIdx && !res.is_ok) buttons[i].classList.add('wrong');
       });
 
+      document.getElementById('stat-score').textContent = res.score;
+      document.getElementById('my-score-pill').textContent = `${res.score} очк.`;
+
       if (res.is_ok) {
         tg.HapticFeedback.notificationOccurred('success');
-        document.getElementById('q-feedback').innerHTML = `<span style="color:var(--success)">✅ Ящик ${res.old_box} → ${res.new_box}</span>`;
-        showToast(`Верно! Ящик ${res.old_box} → ${res.new_box} (+очки)`, 'success');
+        document.getElementById('q-feedback').innerHTML = `<span style="color:var(--success)">✅ +10 очк. (Ящик ${res.old_box}→${res.new_box})</span>`;
+        showToast(`Верно! +10 очков • Ящик ${res.old_box} → ${res.new_box}`, 'success');
       } else {
         tg.HapticFeedback.notificationOccurred('error');
-        document.getElementById('q-feedback').innerHTML = `<span style="color:var(--danger)">❌ Возврат в Ящик 0</span>`;
-        showToast('Ошибка! Возврат в Ящик 0 (повтор через 10 мин)', 'error');
+        document.getElementById('q-feedback').innerHTML = `<span style="color:var(--danger)">❌ -5 очк. (Ящик 0)</span>`;
+        showToast('Ошибка! -5 очков • Возврат в Ящик 0', 'error');
       }
 
       sessionDone++;
@@ -767,23 +811,18 @@
     function buildPlainQuiz() {
       const raw = document.getElementById('plain-input').value;
       const lines = raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-      if (lines.length < 3) {
-        return showToast('Введите вопрос и минимум 2 варианта (каждый с новой строки)', 'error');
-      }
-      if (lines.length > 7) {
-        return showToast('Максимум 1 вопрос и 6 вариантов ответа', 'error');
-      }
+      if (lines.length < 3) return showToast('Введите вопрос и минимум 2 варианта', 'error');
+      if (lines.length > 7) return showToast('Максимум 1 вопрос и 6 вариантов', 'error');
       const question = lines[0];
       const options = lines.slice(1);
       if (new Set(options.map(o => o.toLowerCase())).size < options.length) {
-        return showToast('Варианты ответа не должны повторяться', 'error');
+        return showToast('Варианты не должны повторяться', 'error');
       }
 
       draftPlain = { question, options };
       document.getElementById('preview-q-text').textContent = `❓ ${question}`;
       const wrap = document.getElementById('preview-q-options');
       wrap.innerHTML = '';
-
       options.forEach((opt, idx) => {
         const btn = document.createElement('button');
         btn.className = 'opt-btn';
@@ -791,7 +830,6 @@
         btn.onclick = () => savePlainWithAnswer(idx, btn);
         wrap.appendChild(btn);
       });
-
       document.getElementById('plain-quiz-preview').style.display = 'block';
       showToast('Нажмите на правильный вариант ответа', 'info');
     }
@@ -807,6 +845,7 @@
         correct_idx: correctIdx,
         scope: addScope
       });
+      if (res.sub_required) return;
 
       if (res.error) {
         document.querySelectorAll('#preview-q-options .opt-btn').forEach(b => b.disabled = false);
@@ -821,16 +860,13 @@
       await loadDashboard();
 
       if (res.skipped_limit > 0) {
-        openPopup(
-          'Лимит тестов исчерпан',
-          'Вы достигли текущего лимита личных тестов.\nПригласите друга по реферальной ссылке, чтобы получить +50 тестов!'
-        );
+        openPopup('Лимит исчерпан', 'Пригласите друга по ссылке, чтобы получить +50 тестов!');
       } else {
         openPopup(
           res.added ? 'Вопрос сохранён!' : 'Дубликат пропущен',
           res.added
             ? `Раздел: ${res.scope === 'global' ? '🌍 Для всех' : '👤 Для себя'}\nПравильный ответ: «${chosenText}»`
-            : 'Такой вопрос уже существует в базе.'
+            : 'Такой вопрос уже есть в базе.'
         );
       }
     }
@@ -846,15 +882,12 @@
       };
       reader.readAsText(file, 'utf-8');
     }
-
     async function importJson() {
       const text = document.getElementById('json-input').value.trim();
-      if (!text) return showToast('Сначала выберите файл или вставьте JSON', 'error');
+      if (!text) return showToast('Выберите файл или вставьте JSON', 'error');
 
-      const res = await api('/api/import', 'POST', {
-        json_text: text,
-        scope: addScope
-      });
+      const res = await api('/api/import', 'POST', { json_text: text, scope: addScope });
+      if (res.sub_required) return;
 
       if (res.error) {
         showToast(`Ошибка: ${res.error}`, 'error');
@@ -866,7 +899,7 @@
         await loadDashboard();
         openPopup(
           'Импорт завершён',
-          `Раздел: ${res.scope === 'global' ? '🌍 Для всех' : '👤 Для себя'}\nДобавлено: ${res.added}\nДубликатов пропущено: ${res.dup}\nПропущено по лимиту: ${res.skipped_limit}\nОшибок разбора: ${res.errors_count}`
+          `Раздел: ${res.scope === 'global' ? '🌍 Для всех' : '👤 Для себя'}\nДобавлено: ${res.added}\nДубликатов: ${res.dup}\nПропущено по лимиту: ${res.skipped_limit}\nОшибок: ${res.errors_count}`
         );
       }
     }
