@@ -18,8 +18,8 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import CommandStart
 from aiogram.types import (
-    InlineKeyboardButton,
     CallbackQuery,
+    InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
     Message,
@@ -28,9 +28,9 @@ from aiogram.types import (
 )
 
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("leitner_bot")
+log = logging.getLogger("leitner_ru_bot")
 
-# ---------------- Sozlamalar ----------------
+# ---------------- Настройки ----------------
 TOKEN = os.environ["BOT_TOKEN"]
 WEBAPP_URL = os.getenv("WEBAPP_URL", "").rstrip("/")
 PORT = int(os.getenv("PORT", 8080))
@@ -44,7 +44,8 @@ AUTO_HOUR = 16
 AUTO_COUNT = 10
 DAILY_LIMIT = 50
 
-# Ebbinghaus + Leitner intervallari (soniyalarda)
+# Интервалы Эббингауза + Лейтнера (в секундах)
+# Ящик 0: 10 минут, Ящик 1: 1 день, Ящик 2: 3 дня, Ящик 3: 7 дней, Ящик 4: 16 дней, Ящик 5: 35 дней
 LEITNER_INTERVALS = {
     0: 600,
     1: 86400,
@@ -54,10 +55,11 @@ LEITNER_INTERVALS = {
     5: 35 * 86400,
 }
 
-# ---------------- Baza (WAL rejimi bilan) ----------------
+# ---------------- База данных (WAL) ----------------
 os.makedirs(DATA_DIR, exist_ok=True)
 if DATA_DIR == ".":
-    log.warning("Volume ulanmagan: baza har deploydan keyin o'chib ketadi! Railway'da Volume (/data) qo'shing.")
+    log.warning("Том не подключён: база будет сбрасываться при каждом деплое! Подключите Volume (/data) в Railway.")
+
 db = sqlite3.connect(os.path.join(DATA_DIR, "bot.db"), check_same_thread=False)
 db.row_factory = sqlite3.Row
 db.execute("PRAGMA journal_mode=WAL;")
@@ -167,17 +169,11 @@ def bump_day(uid):
     db.commit()
 
 
-# ---------------- JSON Parsing ----------------
-LIST_KEYS = ("questions", "tests", "savollar", "data", "саволҳо", "саволхо", "тестҳо", "тестхо")
-Q_KEYS = ("question", "savol", "q", "text", "савол", "суол", "матн")
-O_KEYS = (
-    "options", "variants", "choices", "javoblar", "variantlar", "answers",
-    "вариантҳо", "вариантхо", "варианты", "ҷавобҳо", "чавобхо", "ҷавобхо", "интихобҳо",
-)
-A_KEYS = (
-    "answer", "correct", "togri", "to'g'ri", "correct_answer", "javob", "togri_javob",
-    "ҷавоб", "чавоб", "дуруст", "ҷавоби_дуруст", "чавоби_дуруст", "ҷавоби дуруст", "рост",
-)
+# ---------------- Парсинг JSON ----------------
+LIST_KEYS = ("questions", "tests", "data", "items", "вопросы", "тесты", "карточки")
+Q_KEYS = ("question", "q", "text", "вопрос", "текст", "задание")
+O_KEYS = ("options", "variants", "choices", "answers", "варианты", "ответы", "выбор")
+A_KEYS = ("answer", "correct", "correct_answer", "ответ", "верный", "правильный")
 CYR_LETTERS = "АБВГДЕ"
 
 
@@ -187,12 +183,12 @@ def norm(s):
 
 
 def decode_bytes(raw):
-    for enc in ("utf-8-sig", "utf-16", "cp1251"):
+    for enc in ("utf-8-sig", "utf-8", "cp1251", "utf-16"):
         try:
             return raw.decode(enc)
         except (UnicodeDecodeError, UnicodeError):
             continue
-    raise ValueError("Fayl kodirovkasi noma'lum (UTF-8 ishlating)")
+    raise ValueError("Неизвестная кодировка файла (используйте UTF-8)")
 
 
 def pick(d, keys):
@@ -206,11 +202,11 @@ def pick(d, keys):
 def find_correct(opts, letters, ans):
     n = len(opts)
     if ans is None or isinstance(ans, bool):
-        raise ValueError("to'g'ri javob yo'q")
+        raise ValueError("не указан правильный ответ")
     if isinstance(ans, int):
         if 1 <= ans <= n:
             return ans - 1
-        raise ValueError("to'g'ri javob raqami noto'g'ri")
+        raise ValueError("неверный номер правильного ответа")
     s = norm(ans)
     for i, o in enumerate(opts):
         if o.lower() == s.lower():
@@ -224,17 +220,17 @@ def find_correct(opts, letters, ans):
         return "ABCDEF".index(s.upper())
     if s.isdigit() and 1 <= int(s) <= n:
         return int(s) - 1
-    raise ValueError("to'g'ri javob aniqlanmadi")
+    raise ValueError("не удалось определить правильный ответ")
 
 
 def parse_one(it):
     if not isinstance(it, dict):
-        raise ValueError("obyekt emas")
+        raise ValueError("элемент не является объектом")
     q = pick(it, Q_KEYS)
     raw = pick(it, O_KEYS)
     ans = pick(it, A_KEYS)
     if not isinstance(q, str) or not q.strip():
-        raise ValueError("savol topilmadi")
+        raise ValueError("не найден текст вопроса")
     letters = None
     if isinstance(raw, dict):
         letters = [norm(k).upper() for k in raw]
@@ -242,11 +238,11 @@ def parse_one(it):
     elif isinstance(raw, list):
         opts = [norm(v) for v in raw]
     else:
-        raise ValueError("variantlar topilmadi")
+        raise ValueError("не найдены варианты ответа")
     if not 2 <= len(opts) <= 6 or any(not o for o in opts):
-        raise ValueError("variantlar soni/matni noto'g'ri")
+        raise ValueError("неверное количество или текст вариантов")
     if len({o.lower() for o in opts}) < len(opts):
-        raise ValueError("variantlar takrorlangan")
+        raise ValueError("варианты ответа повторяются")
     return norm(q), opts, find_correct(opts, letters, ans)
 
 
@@ -255,7 +251,7 @@ def parse_items(data):
         lst = pick(data, LIST_KEYS)
         data = lst if isinstance(lst, list) else [data]
     if not isinstance(data, list):
-        raise ValueError("JSON ro'yxat bo'lishi kerak")
+        raise ValueError("JSON должен содержать список вопросов")
     items, errors = [], []
     for n, it in enumerate(data, 1):
         try:
@@ -286,20 +282,15 @@ def add_questions(uid, items):
     return added, dup
 
 
-# ---------------- Ebbinghaus + Leitner Core Logikasi ----------------
+# ---------------- Логика Эббингауза + Лейтнера ----------------
 def apply_leitner_answer(uid, qid, is_ok):
     q = db.execute("SELECT * FROM questions WHERE id=? AND user_id=?", (qid, uid)).fetchone()
     if not q:
         return None
     now_ts = int(time.time())
     old_box = q["box"] or 0
-    if is_ok:
-        new_box = min(old_box + 1, 5)
-    else:
-        new_box = 0
-
-    interval = LEITNER_INTERVALS[new_box]
-    next_due = now_ts + interval
+    new_box = min(old_box + 1, 5) if is_ok else 0
+    next_due = now_ts + LEITNER_INTERVALS[new_box]
 
     db.execute(
         "UPDATE questions SET box=?, attempts=attempts+1, correct_count=correct_count+?, "
@@ -330,11 +321,11 @@ def pick_question(uid, mode="due", exclude_ids=None):
     return db.execute(query, (uid, now_ts, *exclude_ids)).fetchone()
 
 
-# ---------------- Bot Klaviaturasi ----------------
-BTN_WORK = "📝 Test ishlash"
-BTN_WRONG = "❌ Xatolarni ishlash"
-BTN_ADD = "➕ Test qo'shish"
-BTN_STATS = "📊 Statistika"
+# ---------------- Клавиатура бота ----------------
+BTN_WORK = "📝 Пройти тест"
+BTN_WRONG = "❌ Работа над ошибками"
+BTN_ADD = "➕ Добавить JSON"
+BTN_STATS = "📊 Статистика"
 
 
 def get_menu():
@@ -345,12 +336,12 @@ def get_menu():
     if WEBAPP_URL:
         rows.insert(
             0,
-            [KeyboardButton(text="🚀 Mini App (Profil & Leitner)", web_app=WebAppInfo(url=WEBAPP_URL))],
+            [KeyboardButton(text="🚀 Открыть Mini App", web_app=WebAppInfo(url=WEBAPP_URL))],
         )
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
-# ---------------- Telegram Bot Handlers ----------------
+# ---------------- Обработчики Telegram ----------------
 router = Router()
 
 
@@ -367,10 +358,9 @@ async def send_question_msg(bot, chat_id, uid, q):
     )
     db.execute("UPDATE sessions SET current_q_id=? WHERE user_id=?", (q["id"], uid))
     db.commit()
-    box_badge = f"📦 Quti {q['box']}/5"
     await bot.send_message(
         chat_id,
-        f"❓ <b>{q['question']}</b>\n<i>{box_badge}</i>",
+        f"❓ <b>{q['question']}</b>\n<i>📦 Ящик Лейтнера: {q['box']}/5</i>",
         reply_markup=kb,
         parse_mode="HTML",
     )
@@ -386,7 +376,7 @@ async def send_next(bot, chat_id, uid):
         pct = round(s["ok"] / s["total"] * 100) if s["total"] else 0
         return await bot.send_message(
             chat_id,
-            f"🏁 Sessiya tugadi: <b>{s['ok']}/{s['total']}</b> ({pct}%)\n🔥 Kun seriyasi: <b>{streak_now(uid)}</b>",
+            f"🏁 Сессия завершена: <b>{s['ok']}/{s['total']}</b> ({pct}%)\n🔥 Ударный режим: <b>{streak_now(uid)} дн.</b>",
             parse_mode="HTML",
         )
 
@@ -399,7 +389,7 @@ async def send_next(bot, chat_id, uid):
     if not q:
         db.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
         db.commit()
-        return await bot.send_message(chat_id, "🎉 Hozircha takrorlanadigan savollar qolmadi!")
+        return await bot.send_message(chat_id, "🎉 На данный момент доступных вопросов для повторения нет!")
 
     db.execute("UPDATE sessions SET remaining=remaining-1 WHERE user_id=?", (uid,))
     db.commit()
@@ -412,18 +402,18 @@ async def start_session(bot, chat_id, uid, mode):
     if mode == "manual":
         n = DAILY_LIMIT - day_count(uid)
         if n <= 0:
-            return await bot.send_message(chat_id, f"Bugungi {DAILY_LIMIT} ta limit tugadi. Ertaga davom etamiz 💪")
+            return await bot.send_message(chat_id, f"Дневной лимит {DAILY_LIMIT} вопросов исчерпан. Возвращайтесь завтра!")
     elif mode == "wrong":
         n = db.execute(
             "SELECT COUNT(*) c FROM questions WHERE user_id=? AND seen=1 AND last_ok=0", (uid,)
         ).fetchone()["c"]
         if n == 0:
-            return await bot.send_message(chat_id, "Xato qilingan savollar yo'q 🎉")
+            return await bot.send_message(chat_id, "Ошибочных вопросов пока нет 🎉")
     else:
         n = AUTO_COUNT
 
     if not pick_question(uid, mode):
-        return await bot.send_message(chat_id, "Hozircha takrorlash vaqti kelgan savollar yo'q. Keyinroq kiring!")
+        return await bot.send_message(chat_id, "Пока нет вопросов, которым пора вернуться по расписанию повторений.")
 
     db.execute(
         "INSERT OR REPLACE INTO sessions(user_id,current_q_id,remaining,total,ok,mode,started) VALUES(?,0,?,0,0,?,?)",
@@ -440,25 +430,28 @@ async def cmd_start(m: Message):
     if WEBAPP_URL:
         inline = InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="✨ Mini App ni ochish", web_app=WebAppInfo(url=WEBAPP_URL))]
+                [InlineKeyboardButton(text="✨ Открыть Mini App", web_app=WebAppInfo(url=WEBAPP_URL))]
             ]
         )
     await m.answer(
-        f"Salom, <b>{m.from_user.first_name}</b>! 👋\n\n"
-        "Bu bot <b>Ebbinghaus xotira egri chizig'i</b> va <b>Leitner qutilari</b> asosida so'z va testlarni abadiy yodlashga yordam beradi.\n\n"
-        "🚀 To'liq vizual statistika, profil va qulay test ishlash uchun <b>Mini App</b> tugmasini bosing!",
+        f"Привет, <b>{m.from_user.first_name}</b>! 👋\n\n"
+        "Этот бот помогает запоминать материал по методу <b>кривой забывания Эббингауза</b> и <b>системы карточек Лейтнера</b>.\n\n"
+        "Вы можете проходить тесты прямо в чате или открыть удобное <b>Mini App</b> с профилем, статистикой и всплывающими окнами.",
         reply_markup=get_menu(),
         parse_mode="HTML",
     )
     if inline:
-        await m.answer("Tezkor kirish:", reply_markup=inline)
+        await m.answer("Быстрый запуск приложения:", reply_markup=inline)
 
 
 @router.message(F.text == BTN_ADD)
 async def btn_add(m: Message):
     await m.answer(
-        "📎 <b>.json</b> fayl yuboring yoki Mini App orqali matn ko'rinishida qo'shing.\n\n"
-        '<code>[{"question": "Abandon", "options": ["Tark etmoq", "Qabul qilmoq", "Yugurmoq", "O\'ylamoq"], "answer": "Tark etmoq"}]</code>',
+        "📥 <b>Как добавить вопросы:</b>\n\n"
+        "1. Отправьте сюда <b>.json</b> файл как документ.\n"
+        "2. Или просто отправьте в чат текст в формате JSON (или добавьте его через Mini App).\n\n"
+        "Пример:\n"
+        '<code>[{"question": "Capital of Russia?", "options": ["Москва", "Санкт-Петербург", "Казань"], "answer": "Москва"}]</code>',
         parse_mode="HTML",
     )
 
@@ -469,19 +462,21 @@ async def on_document(m: Message, bot: Bot):
     ensure_user(uid, m.from_user.full_name)
     doc = m.document
     if not (doc.file_name or "").lower().endswith(".json"):
-        return await m.answer("Iltimos, .json fayl yuboring.")
+        return await m.answer("Пожалуйста, отправьте файл с расширением <b>.json</b>.", parse_mode="HTML")
+    if doc.file_size and doc.file_size > 5 * 1024 * 1024:
+        return await m.answer("Файл слишком большой (максимум 5 МБ).")
     buf = io.BytesIO()
     await bot.download(doc, destination=buf)
     try:
         data = json.loads(decode_bytes(buf.getvalue()))
         items, errors = parse_items(data)
     except Exception as e:
-        return await m.answer(f"❌ Faylni o'qib bo'lmadi: {e}")
+        return await m.answer(f"❌ Ошибка при чтении файла: {e}")
     added, dup = add_questions(uid, items)
-    await m.answer(
-        f"✅ Qo'shildi: <b>{added}</b>\n♻️ Takroriy: <b>{dup}</b>\n⚠️ Xato: <b>{len(errors)}</b>",
-        parse_mode="HTML",
-    )
+    msg = f"✅ Добавлено: <b>{added}</b>\n♻️ Уже было в базе: <b>{dup}</b>"
+    if errors:
+        msg += f"\n⚠️ Пропущено с ошибкой: <b>{len(errors)}</b>\n" + "\n".join(errors[:5])
+    await m.answer(msg, parse_mode="HTML")
 
 
 @router.message(F.text == BTN_STATS)
@@ -493,11 +488,12 @@ async def btn_stats(m: Message):
     due = db.execute("SELECT COUNT(*) c FROM questions WHERE user_id=? AND due<=?", (uid, now_ts)).fetchone()["c"]
     mastered = db.execute("SELECT COUNT(*) c FROM questions WHERE user_id=? AND box>=4", (uid,)).fetchone()["c"]
     await m.answer(
-        f"📊 <b>Statistika:</b>\n\n"
-        f"📚 Jami savollar: <b>{total}</b>\n"
-        f"⏳ Takrorlash vaqti kelgan: <b>{due}</b>\n"
-        f"🏆 Mustahkam yodlangan (Box 4-5): <b>{mastered}</b>\n"
-        f"🔥 Kun seriyasi: <b>{streak_now(uid)}</b>",
+        f"📊 <b>Ваша статистика:</b>\n\n"
+        f"📚 Всего вопросов: <b>{total}</b>\n"
+        f"⏳ Готово к повторению: <b>{due}</b>\n"
+        f"🏆 Закреплено (Ящики 4–5): <b>{mastered}</b>\n"
+        f"🔥 Серия дней: <b>{streak_now(uid)}</b>\n"
+        f"📅 Сегодня пройдено: <b>{day_count(uid)}/{DAILY_LIMIT}</b>",
         parse_mode="HTML",
     )
 
@@ -512,6 +508,24 @@ async def btn_wrong(m: Message, bot: Bot):
     await start_session(bot, m.chat.id, m.from_user.id, "wrong")
 
 
+@router.message(F.text)
+async def on_text_json_or_fallback(m: Message):
+    txt = (m.text or "").strip()
+    if txt.startswith("[") or txt.startswith("{"):
+        uid = m.from_user.id
+        ensure_user(uid, m.from_user.full_name)
+        try:
+            data = json.loads(decode_bytes(txt.encode("utf-8")))
+            items, errors = parse_items(data)
+        except Exception as e:
+            return await m.answer(f"❌ Некорректный JSON: {e}")
+        added, dup = add_questions(uid, items)
+        msg = f"✅ Добавлено: <b>{added}</b>\n♻️ Дубликатов пропущено: <b>{dup}</b>"
+        if errors:
+            msg += f"\n⚠️ Ошибок: <b>{len(errors)}</b>\n" + "\n".join(errors[:5])
+        return await m.answer(msg, parse_mode="HTML")
+
+
 @router.callback_query(F.data.startswith("a:"))
 async def on_answer(cb: CallbackQuery, bot: Bot):
     uid = cb.from_user.id
@@ -520,11 +534,11 @@ async def on_answer(cb: CallbackQuery, bot: Bot):
 
     sess = db.execute("SELECT * FROM sessions WHERE user_id=?", (uid,)).fetchone()
     if sess and sess["current_q_id"] != qid:
-        return await cb.answer("Bu savolga allaqachon javob berilgan!")
+        return await cb.answer("На этот вопрос уже дан ответ!")
 
     q = db.execute("SELECT * FROM questions WHERE id=? AND user_id=?", (qid, uid)).fetchone()
     if not q:
-        return await cb.answer("Savol topilmadi")
+        return await cb.answer("Вопрос не найден")
 
     opts = json.loads(q["options"])
     correct = q["correct"]
@@ -550,8 +564,8 @@ async def on_answer(cb: CallbackQuery, bot: Bot):
             bump_day(uid)
         db.commit()
 
-    box_msg = f"📦 Quti: {res['old_box']} ➔ {res['new_box']}" if res else ""
-    await cb.answer(f"{'✅ To\'g\'ri!' if ok else '❌ Xato!'} {box_msg}")
+    box_info = f"📦 Ящик: {res['old_box']} → {res['new_box']}" if res else ""
+    await cb.answer(f"{'✅ Верно!' if ok else '❌ Ошибка!'} {box_info}")
     await send_next(bot, cb.message.chat.id, uid)
 
 
@@ -560,7 +574,7 @@ async def noop(cb: CallbackQuery):
     await cb.answer()
 
 
-# ---------------- Mini App Xavfsizlik va REST API ----------------
+# ---------------- Безопасность и API для Mini App ----------------
 def verify_telegram_webapp(init_data: str) -> dict | None:
     if not init_data:
         return None
@@ -594,7 +608,7 @@ async def handle_index(request: web.Request):
 async def api_dashboard(request: web.Request):
     user = get_api_user(request)
     if not user:
-        return web.json_response({"error": "Unauthorized"}, status=401)
+        return web.json_response({"error": "Доступ запрещён"}, status=401)
     uid = user["id"]
     now_ts = int(time.time())
 
@@ -639,7 +653,7 @@ async def api_dashboard(request: web.Request):
 async def api_next_question(request: web.Request):
     user = get_api_user(request)
     if not user:
-        return web.json_response({"error": "Unauthorized"}, status=401)
+        return web.json_response({"error": "Доступ запрещён"}, status=401)
     uid = user["id"]
     mode = request.query.get("mode", "due")
     exclude_raw = request.query.get("exclude", "")
@@ -666,7 +680,7 @@ async def api_next_question(request: web.Request):
 async def api_submit_answer(request: web.Request):
     user = get_api_user(request)
     if not user:
-        return web.json_response({"error": "Unauthorized"}, status=401)
+        return web.json_response({"error": "Доступ запрещён"}, status=401)
     uid = user["id"]
     body = await request.json()
     qid = int(body.get("question_id", 0))
@@ -674,7 +688,7 @@ async def api_submit_answer(request: web.Request):
 
     q = db.execute("SELECT * FROM questions WHERE id=? AND user_id=?", (qid, uid)).fetchone()
     if not q:
-        return web.json_response({"error": "Not found"}, status=404)
+        return web.json_response({"error": "Вопрос не найден"}, status=404)
 
     is_ok = chosen_idx == q["correct"]
     res = apply_leitner_answer(uid, qid, is_ok)
@@ -692,12 +706,12 @@ async def api_submit_answer(request: web.Request):
 async def api_import_json(request: web.Request):
     user = get_api_user(request)
     if not user:
-        return web.json_response({"error": "Unauthorized"}, status=401)
+        return web.json_response({"error": "Доступ запрещён"}, status=401)
     uid = user["id"]
     body = await request.json()
     raw_text = body.get("json_text", "")
     try:
-        data = json.loads(raw_text)
+        data = json.loads(decode_bytes(raw_text.encode("utf-8")))
         items, errors = parse_items(data)
     except Exception as e:
         return web.json_response({"error": str(e)}, status=400)
@@ -711,7 +725,7 @@ async def api_import_json(request: web.Request):
     })
 
 
-# ---------------- Avtomatik Scheduler & Main ----------------
+# ---------------- Планировщик и запуск ----------------
 async def scheduler(bot: Bot):
     while True:
         try:
@@ -730,9 +744,9 @@ async def scheduler(bot: Bot):
                     try:
                         await start_session(bot, uid, uid, "auto")
                     except Exception as e:
-                        log.warning("Auto test failed for %s: %s", uid, e)
+                        log.warning("Ошибка авто-теста для %s: %s", uid, e)
         except Exception as e:
-            log.exception("Scheduler error: %s", e)
+            log.exception("Ошибка планировщика: %s", e)
         await asyncio.sleep(30)
 
 
@@ -752,7 +766,7 @@ async def main():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    log.info("WebApp server running on port %s", PORT)
+    log.info("Сервер Mini App запущен на порту %s", PORT)
 
     asyncio.create_task(scheduler(bot))
     await dp.start_polling(bot)
@@ -760,3 +774,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+  
