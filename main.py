@@ -154,7 +154,6 @@ for _sql in (
         pass
 db.commit()
 
-# Foydalanuvchi uchun 10 soniyalik avtomatik kuzatuv holati (chat va mini app)
 watch_tasks: dict[tuple[str, int], asyncio.Task] = {}
 webapp_watch_state: dict[int, dict] = {}
 
@@ -348,6 +347,8 @@ def build_subscribe_keyboard(missing_channels: list[dict]) -> InlineKeyboardMark
             )
         ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 async def run_chat_subscription_watch(bot: Bot, chat_id: int, uid: int):
     key = ("chat", uid)
     try:
@@ -378,8 +379,6 @@ def start_chat_watch_if_needed(bot: Bot, chat_id: int, uid: int):
     if old and not old.done():
         return
     watch_tasks[key] = asyncio.create_task(run_chat_subscription_watch(bot, chat_id, uid))
-
-
 JSON_FORMAT_EXAMPLE = """[
   {
     "question": "Столица России?",
@@ -678,6 +677,8 @@ def get_menu():
     if WEBAPP_URL:
         rows.insert(0, [KeyboardButton(text="🚀 Открыть Mini App", web_app=WebAppInfo(url=WEBAPP_URL))])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+
 router = Router()
 
 
@@ -738,7 +739,7 @@ async def send_next(bot, chat_id, uid):
     if not q:
         db.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
         db.commit()
-        return await bot.send_message(chat_id, "🎉 На данный момент доступных вопросов для повторения нет!")
+        return await bot.send_message(chat_id, "Здесь ничего нет")
 
     db.execute("UPDATE sessions SET remaining=remaining-1 WHERE user_id=?", (uid,))
     db.commit()
@@ -761,12 +762,12 @@ async def start_session(bot, chat_id, uid, mode):
             "SELECT COUNT(*) c FROM questions WHERE user_id=? AND seen=1 AND last_ok=0", (uid,)
         ).fetchone()["c"]
         if n == 0:
-            return await bot.send_message(chat_id, "Ошибочных вопросов пока нет 🎉")
+            return await bot.send_message(chat_id, "Здесь ничего нет")
     else:
         n = AUTO_COUNT
 
     if not pick_question(uid, mode):
-        return await bot.send_message(chat_id, "Пока нет вопросов для повторения.")
+        return await bot.send_message(chat_id, "Здесь ничего нет")
 
     db.execute(
         "INSERT OR REPLACE INTO sessions(user_id,current_q_id,remaining,total,ok,mode,started) VALUES(?,0,?,0,0,?,?)",
@@ -774,8 +775,6 @@ async def start_session(bot, chat_id, uid, mode):
     )
     db.commit()
     await send_next(bot, chat_id, uid)
-
-
 @router.message(CommandStart())
 async def cmd_start(m: Message, bot: Bot):
     uid = m.from_user.id
@@ -988,6 +987,8 @@ async def on_text_input(m: Message, bot: Bot):
             reply_markup=kb,
             parse_mode="HTML",
         )
+
+
 @router.callback_query(F.data.startswith("sublink:"))
 async def on_sublink_click(cb: CallbackQuery, bot: Bot):
     start_chat_watch_if_needed(bot, cb.message.chat.id, cb.from_user.id)
@@ -1107,8 +1108,6 @@ def get_api_user(request: web.Request) -> dict | None:
         ensure_user(int(user["id"]), full_name, user.get("username", ""))
         return user
     return None
-
-
 async def handle_index(request: web.Request):
     return web.FileResponse(os.path.join(os.path.dirname(__file__), "webapp.html"))
 
@@ -1348,6 +1347,62 @@ async def api_add_plain(request: web.Request):
     })
 
 
+async def api_admin_questions_list(request: web.Request):
+    user = get_api_user(request)
+    if not user or not is_admin(int(user["id"])):
+        return web.json_response({"error": "Нет прав администратора"}, status=403)
+    uid = int(user["id"])
+    scope = request.query.get("scope", "personal")
+    if scope not in ("personal", "global"):
+        scope = "personal"
+
+    if scope == "global":
+        rows = db.execute(
+            "SELECT id, h, question, options, correct, box FROM questions "
+            "WHERE user_id=0 AND scope='global' ORDER BY id DESC"
+        ).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT id, h, question, options, correct, box FROM questions "
+            "WHERE user_id=? AND scope='personal' ORDER BY id DESC",
+            (uid,),
+        ).fetchall()
+
+    items = []
+    for r in rows:
+        opts = json.loads(r["options"])
+        ans_text = opts[r["correct"]] if 0 <= r["correct"] < len(opts) else ""
+        items.append({
+            "id": r["id"],
+            "h": r["h"],
+            "question": r["question"],
+            "options": opts,
+            "answer": ans_text,
+            "box": r["box"],
+            "scope": scope,
+        })
+    return web.json_response({"scope": scope, "questions": items})
+
+
+async def api_admin_delete_question(request: web.Request):
+    user = get_api_user(request)
+    if not user or not is_admin(int(user["id"])):
+        return web.json_response({"error": "Нет прав администратора"}, status=403)
+    uid = int(user["id"])
+    body = await request.json()
+    scope = body.get("scope", "personal")
+    qid = int(body.get("id", 0))
+
+    if scope == "global":
+        row = db.execute("SELECT h FROM questions WHERE id=? AND user_id=0 AND scope='global'", (qid,)).fetchone()
+        if row:
+            db.execute("DELETE FROM questions WHERE h=? AND scope='global'", (row["h"],))
+    else:
+        db.execute("DELETE FROM questions WHERE id=? AND user_id=? AND scope='personal'", (qid, uid))
+    db.commit()
+    return web.json_response({"ok": True})
+
+
 async def scheduler(bot: Bot):
     while True:
         try:
@@ -1389,6 +1444,8 @@ async def main():
     app.router.add_post("/api/answer", api_submit_answer)
     app.router.add_post("/api/import", api_import_json)
     app.router.add_post("/api/add-plain", api_add_plain)
+    app.router.add_get("/api/admin/questions", api_admin_questions_list)
+    app.router.add_post("/api/admin/questions/delete", api_admin_delete_question)
 
     runner = web.AppRunner(app)
     await runner.setup()
