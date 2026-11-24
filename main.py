@@ -19,6 +19,7 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import CommandStart
 from aiogram.types import (
     InlineKeyboardButton,
+    CallbackQuery,
     InlineKeyboardMarkup,
     KeyboardButton,
     Message,
