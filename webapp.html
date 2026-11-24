@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Leitner & Ebbinghaus Trainer</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      --bg: var(--tg-theme-bg-color, #0f172a);
+      --card: var(--tg-theme-secondary-bg-color, #1e293b);
+      --text: var(--tg-theme-text-color, #f8fafc);
+      --hint: var(--tg-theme-hint-color, #94a3b8);
+      --accent: var(--tg-theme-button-color, #3b82f6);
+      --accent-text: var(--tg-theme-button-text-color, #ffffff);
+      --success: #10b981;
+      --danger: #ef4444;
+      --warning: #f59e0b;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+    body { background: var(--bg); color: var(--text); padding: 16px 16px 88px; min-height: 100vh; }
+
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
+    .header h1 { font-size: 20px; font-weight: 700; }
+    .streak-badge { background: rgba(245, 158, 11, 0.15); color: var(--warning); padding: 6px 12px; border-radius: 20px; font-weight: 700; font-size: 14px; }
+
+    .card { background: var(--card); border-radius: 16px; padding: 16px; margin-bottom: 14px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px; }
+    .stat-box { background: var(--card); border-radius: 16px; padding: 14px; text-align: center; }
+    .stat-val { font-size: 26px; font-weight: 800; color: var(--accent); }
+    .stat-lbl { font-size: 12px; color: var(--hint); margin-top: 4px; }
+
+    /* Leitner Qutilari */
+    .boxes-title { font-size: 14px; font-weight: 600; margin-bottom: 12px; display: flex; justify-content: space-between; }
+    .box-row { display: flex; align-items: center; margin-bottom: 8px; font-size: 13px; }
+    .box-label { width: 76px; color: var(--hint); font-weight: 600; }
+    .box-bar-bg { flex: 1; height: 10px; background: rgba(148, 163, 184, 0.2); border-radius: 6px; overflow: hidden; margin: 0 10px; }
+    .box-bar-fill { height: 100%; border-radius: 6px; transition: width 0.4s ease; }
+    .box-count { width: 32px; text-align: right; font-weight: 700; }
+
+    /* Tugmalar */
+    .btn { width: 100%; padding: 14px; border: none; border-radius: 14px; font-size: 15px; font-weight: 700; cursor: pointer; transition: transform 0.1s, opacity 0.2s; margin-bottom: 10px; }
+    .btn:active { transform: scale(0.98); }
+    .btn-primary { background: var(--accent); color: var(--accent-text); }
+    .btn-danger { background: rgba(239, 68, 68, 0.15); color: var(--danger); }
+
+    /* Quiz ekrani */
+    .q-header { display: flex; justify-content: space-between; font-size: 12px; color: var(--hint); margin-bottom: 10px; }
+    .q-text { font-size: 19px; font-weight: 700; line-height: 1.4; margin-bottom: 18px; }
+    .opt-btn { width: 100%; text-align: left; padding: 14px 16px; margin-bottom: 10px; border-radius: 12px; border: 2px solid rgba(148,163,184,0.2); background: var(--bg); color: var(--text); font-size: 15px; font-weight: 500; cursor: pointer; transition: all 0.2s; }
+    .opt-btn.correct { border-color: var(--success); background: rgba(16, 185, 129, 0.18); color: var(--success); font-weight: 700; }
+    .opt-btn.wrong { border-color: var(--danger); background: rgba(239, 68, 68, 0.18); color: var(--danger); }
+
+    /* Import & Profile */
+    textarea { width: 100%; height: 160px; background: var(--bg); color: var(--text); border: 1px solid rgba(148,163,184,0.3); border-radius: 12px; padding: 12px; font-size: 13px; margin-bottom: 12px; resize: none; }
+    .avatar { width: 68px; height: 68px; border-radius: 50%; background: var(--accent); color: var(--accent-text); display: flex; align-items: center; justify-content: center; font-size: 28px; font-weight: 800; margin: 0 auto 12px; }
+
+    /* Bottom Navigation */
+    .nav { position: fixed; bottom: 0; left: 0; right: 0; background: var(--card); display: flex; justify-content: space-around; padding: 10px 0 18px; border-top: 1px solid rgba(148,163,184,0.15); z-index: 100; }
+    .nav-item { background: none; border: none; color: var(--hint); font-size: 11px; font-weight: 600; display: flex; flex-direction: column; align-items: center; gap: 4px; cursor: pointer; }
+    .nav-item.active { color: var(--accent); }
+    .nav-icon { font-size: 20px; }
+
+    .tab { display: none; }
+    .tab.active { display: block; animation: fadeIn 0.2s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+  </style>
+</head>
+<body>
+
+  <!-- 1. DASHBOARD PANELI -->
+  <div id="tab-home" class="tab active">
+    <div class="header">
+      <h1>Leitner Memory</h1>
+      <div class="streak-badge" id="streak-badge">🔥 0 kun</div>
+    </div>
+
+    <div class="grid-2">
+      <div class="stat-box">
+        <div class="stat-val" id="stat-due">0</div>
+        <div class="stat-lbl">Takrorlash vaqti</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-val" style="color: var(--success)" id="stat-total">0</div>
+        <div class="stat-lbl">Jami savollar</div>
+      </div>
+    </div>
+
+    <button class="btn btn-primary" onclick="startQuiz('due')">🧠 Takrorlashni boshlash</button>
+    <button class="btn btn-danger" onclick="startQuiz('wrong')">❌ Xatolar ustida ishlash (<span id="stat-wrong">0</span>)</button>
+
+    <div class="card">
+      <div class="boxes-title">
+        <span>📦 Ebbinghaus-Leitner Qutilari</span>
+        <span style="color: var(--hint); font-size: 12px;">Box 0 → 5</span>
+      </div>
+      <div id="leitner-boxes"></div>
+    </div>
+  </div>
+
+  <!-- 2. TEST ISHLASH PANELI -->
+  <div id="tab-quiz" class="tab">
+    <div class="header">
+      <h1 id="quiz-mode-title">Test</h1>
+      <span id="quiz-counter" style="color: var(--hint); font-size: 14px;">0 ishlandi</span>
+    </div>
+    <div id="quiz-container" class="card">
+      <div class="q-header">
+        <span id="q-box-badge">📦 Box 0</span>
+        <span id="q-feedback"></span>
+      </div>
+      <div class="q-text" id="q-text">Yuklanmoqda...</div>
+      <div id="q-options"></div>
+    </div>
+    <button class="btn btn-primary" id="next-btn" style="display:none;" onclick="loadNextQuestion()">Keyingi savol ➔</button>
+  </div>
+
+  <!-- 3. TEST QO'SHISH PANELI -->
+  <div id="tab-add" class="tab">
+    <div class="header"><h1>➕ Test Qo'shish</h1></div>
+    <div class="card">
+      <p style="font-size: 13px; color: var(--hint); margin-bottom: 10px;">
+        JSON formatidagi savollar ro'yxatini joylang:
+      </p>
+      <textarea id="json-input" placeholder='[{"question": "Persistent", "options": ["Qatʼiy", "Vaqtinchalik", "Sekin", "Zaif"], "answer": "Qatʼiy"}]'></textarea>
+      <button class="btn btn-primary" onclick="importJson()">Bazaga saqlash</button>
+      <div id="import-result" style="font-size: 13px; margin-top: 8px; text-align: center;"></div>
+    </div>
+  </div>
+
+  <!-- 4. PROFIL PANELI -->
+  <div id="tab-profile" class="tab">
+    <div class="header"><h1>👤 Profil</h1></div>
+    <div class="card" style="text-align: center;">
+      <div class="avatar" id="prof-avatar">U</div>
+      <h2 id="prof-name" style="font-size: 18px;">Foydalanuvchi</h2>
+      <p id="prof-username" style="font-size: 13px; color: var(--hint); margin-top: 2px;">@username</p>
+    </div>
+
+    <div class="grid-2">
+      <div class="stat-box">
+        <div class="stat-val" id="prof-acc">0%</div>
+        <div class="stat-lbl">Aniqlik (Accuracy)</div>
+      </div>
+      <div class="stat-box">
+        <div class="stat-val" id="prof-today">0/50</div>
+        <div class="stat-lbl">Bugungi limit</div>
+      </div>
+    </div>
+
+    <div class="card" style="font-size: 13px; line-height: 1.6; color: var(--hint);">
+      <b style="color: var(--text);">Ebbinghaus + Leitner qoidasi:</b><br>
+      • <b>Box 0:</b> 10 daqiqa (yangi yoki xato)<br>
+      • <b>Box 1:</b> 1 kun • <b>Box 2:</b> 3 kun<br>
+      • <b>Box 3:</b> 7 kun • <b>Box 4:</b> 16 kun<br>
+      • <b>Box 5:</b> 35 kun (To'liq o'zlashtirilgan)
+    </div>
+  </div>
+
+  <!-- PASTKI NAVIGATSIYA -->
+  <nav class="nav">
+    <button class="nav-item active" onclick="switchTab('home', this)">
+      <span class="nav-icon">🏠</span><span>Asosiy</span>
+    </button>
+    <button class="nav-item" onclick="startQuiz('due')">
+      <span class="nav-icon">🧠</span><span>Test</span>
+    </button>
+    <button class="nav-item" onclick="switchTab('add', this)">
+      <span class="nav-icon">➕</span><span>Qo'shish</span>
+    </button>
+    <button class="nav-item" onclick="switchTab('profile', this)">
+      <span class="nav-icon">👤</span><span>Profil</span>
+    </button>
+  </nav>
+
+  <script>
+    const tg = window.Telegram.WebApp;
+    tg.ready();
+    tg.expand();
+
+    let currentMode = 'due';
+    let currentQuestion = null;
+    let answered = false;
+    let sessionDone = 0;
+    let seenIds = [];
+
+    const boxColors = ['#ef4444', '#f97316', '#f59e0b', '#3b82f6', '#8b5cf6', '#10b981'];
+    const boxNames = ['Box 0 (10m)', 'Box 1 (1k)', 'Box 2 (3k)', 'Box 3 (7k)', 'Box 4 (16k)', 'Box 5 (35k)'];
+
+    async function api(path, method = 'GET', body = null) {
+      const opts = {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Telegram-Init-Data': tg.initData
+        }
+      };
+      if (body) opts.body = JSON.stringify(body);
+      const res = await fetch(path, opts);
+      return res.json();
+    }
+
+    function switchTab(name, el) {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.getElementById('tab-' + name).classList.add('active');
+      if (el) {
+        document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+        el.classList.add('active');
+      }
+      if (name === 'home' || name === 'profile') loadDashboard();
+    }
+
+    async function loadDashboard() {
+      const data = await api('/api/dashboard');
+      if (data.error) return;
+
+      const { user, stats } = data;
+      document.getElementById('streak-badge').textContent = `🔥 ${user.streak} kun`;
+      document.getElementById('stat-due').textContent = stats.due;
+      document.getElementById('stat-total').textContent = stats.total;
+      document.getElementById('stat-wrong').textContent = stats.wrong;
+
+      // Profile
+      document.getElementById('prof-name').textContent = user.name || 'Foydalanuvchi';
+      document.getElementById('prof-username').textContent = user.username ? `@${user.username}` : `ID: ${user.id}`;
+      document.getElementById('prof-avatar').textContent = (user.name || 'U')[0].toUpperCase();
+      document.getElementById('prof-acc').textContent = `${stats.accuracy}%`;
+      document.getElementById('prof-today').textContent = `${user.today_done}/${user.daily_limit}`;
+
+      // Leitner boxes
+      const container = document.getElementById('leitner-boxes');
+      container.innerHTML = '';
+      const maxVal = Math.max(stats.total, 1);
+      for (let i = 0; i <= 5; i++) {
+        const cnt = stats.boxes[String(i)] || 0;
+        const pct = Math.round((cnt / maxVal) * 100);
+        container.innerHTML += `
+          <div class="box-row">
+            <div class="box-label">${boxNames[i]}</div>
+            <div class="box-bar-bg">
+              <div class="box-bar-fill" style="width: ${pct}%; background: ${boxColors[i]};"></div>
+            </div>
+            <div class="box-count">${cnt}</div>
+          </div>`;
+      }
+    }
+
+    function startQuiz(mode) {
+      currentMode = mode;
+      sessionDone = 0;
+      seenIds = [];
+      document.getElementById('quiz-mode-title').textContent = mode === 'wrong' ? '❌ Xatolarni ishlash' : '🧠 Takrorlash';
+      document.getElementById('quiz-counter').textContent = '0 ishlandi';
+      switchTab('quiz', document.querySelectorAll('.nav-item')[1]);
+      loadNextQuestion();
+    }
+
+    async function loadNextQuestion() {
+      answered = false;
+      document.getElementById('next-btn').style.display = 'none';
+      document.getElementById('q-feedback').textContent = '';
+      document.getElementById('q-text').textContent = 'Savol yuklanmoqda...';
+      document.getElementById('q-options').innerHTML = '';
+
+      const data = await api(`/api/question?mode=${currentMode}&exclude=${seenIds.join(',')}`);
+      if (!data.question) {
+        document.getElementById('q-text').textContent = '🎉 Barcha savollar yakunlandi!';
+        document.getElementById('q-box-badge').textContent = 'Tugadi';
+        return;
+      }
+
+      currentQuestion = data.question;
+      seenIds.push(currentQuestion.id);
+      document.getElementById('q-box-badge').textContent = `📦 ${boxNames[currentQuestion.box]}`;
+      document.getElementById('q-text').textContent = currentQuestion.text;
+
+      const optsDiv = document.getElementById('q-options');
+      currentQuestion.options.forEach(opt => {
+        const btn = document.createElement('button');
+        btn.className = 'opt-btn';
+        btn.textContent = opt.text;
+        btn.onclick = () => submitAnswer(opt.idx, btn);
+        optsDiv.appendChild(btn);
+      });
+    }
+
+    async function submitAnswer(optIdx, clickedBtn) {
+      if (answered) return;
+      answered = true;
+
+      const res = await api('/api/answer', 'POST', {
+        question_id: currentQuestion.id,
+        option_idx: optIdx
+      });
+
+      const buttons = document.querySelectorAll('.opt-btn');
+      currentQuestion.options.forEach((opt, i) => {
+        if (opt.idx === res.correct_idx) buttons[i].classList.add('correct');
+        else if (opt.idx === optIdx && !res.is_ok) buttons[i].classList.add('wrong');
+      });
+
+      if (res.is_ok) {
+        tg.HapticFeedback.notificationOccurred('success');
+        document.getElementById('q-feedback').innerHTML = `<span style="color:var(--success)">✅ Box ${res.old_box} ➔ ${res.new_box}</span>`;
+      } else {
+        tg.HapticFeedback.notificationOccurred('error');
+        document.getElementById('q-feedback').innerHTML = `<span style="color:var(--danger)">❌ Box 0 ga qaytdi</span>`;
+      }
+
+      sessionDone++;
+      document.getElementById('quiz-counter').textContent = `${sessionDone} ishlandi`;
+      document.getElementById('next-btn').style.display = 'block';
+    }
+
+    async function importJson() {
+      const text = document.getElementById('json-input').value.trim();
+      const resDiv = document.getElementById('import-result');
+      if (!text) return;
+
+      const res = await api('/api/import', 'POST', { json_text: text });
+      if (res.error) {
+        resDiv.innerHTML = `<span style="color:var(--danger)">❌ Xato: ${res.error}</span>`;
+      } else {
+        tg.HapticFeedback.notificationOccurred('success');
+        resDiv.innerHTML = `<span style="color:var(--success)">✅ Qo'shildi: ${res.added} | Takroriy: ${res.dup}</span>`;
+        document.getElementById('json-input').value = '';
+      }
+    }
+
+    loadDashboard();
+  </script>
+</body>
+</html>
