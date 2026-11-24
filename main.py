@@ -1,72 +1,70 @@
 import asyncio
 import hashlib
-import io
+import hmac
 import json
 import logging
 import os
 import random
-import sqlite3
 import re
+import sqlite3
 import time
 import unicodedata
 from datetime import datetime, timedelta
+from urllib.parse import parse_qsl
 from zoneinfo import ZoneInfo
 
+from aiohttp import web
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import CommandStart
 from aiogram.types import (
-    BufferedInputFile,
-    CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
     Message,
     ReplyKeyboardMarkup,
+    WebAppInfo,
 )
-from PIL import Image, ImageDraw, ImageFont
 
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("testbot")
+log = logging.getLogger("leitner_bot")
 
 # ---------------- Sozlamalar ----------------
 TOKEN = os.environ["BOT_TOKEN"]
+WEBAPP_URL = os.getenv("WEBAPP_URL", "").rstrip("/")  # Masalan: https://sizning-app.up.railway.app
+PORT = int(os.getenv("PORT", 8080))
 DATA_DIR = (
     os.getenv("DATA_DIR")
     or os.getenv("RAILWAY_VOLUME_MOUNT_PATH")
     or ("/data" if os.path.isdir("/data") else ".")
 )
 TZ = ZoneInfo(os.getenv("BOT_TZ", "Asia/Tashkent"))
-AUTO_HOUR = 16        # avtomatik test vaqti (soat)
-AUTO_COUNT = 10       # kunlik avtomatik testlar soni
-DAILY_LIMIT = 50      # "Test ishlash" tugmasi bilan kuniga maksimum
-REPEAT_DAYS = 2       # to'g'ri ishlangan test necha kundan keyin qaytadi
-WRONG_REPEAT_DAYS = 1  # xato ishlangan test necha kundan keyin qaytadi
+AUTO_HOUR = 16
+AUTO_COUNT = 10
+DAILY_LIMIT = 50
 
-BTN_ADD = "➕ Test qo'shish"
-BTN_COUNT = "📊 Testlar soni"
-BTN_PROGRESS = "📈 Progress"
-BTN_WORK = "📝 Test ishlash"
-BTN_WRONG = "❌ Xatolarni ishlash"
+# Ebbinghaus + Leitner intervallari (soniyalarda)
+# Box 0: 10 daqiqa, Box 1: 1 kun, Box 2: 3 kun, Box 3: 7 kun, Box 4: 16 kun, Box 5: 35 kun
+LEITNER_INTERVALS = {
+    0: 600,
+    1: 86400,
+    2: 3 * 86400,
+    3: 7 * 86400,
+    4: 16 * 86400,
+    5: 35 * 86400,
+}
 
-MENU = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text=BTN_WORK), KeyboardButton(text=BTN_PROGRESS)],
-        [KeyboardButton(text=BTN_WRONG), KeyboardButton(text=BTN_COUNT)],
-        [KeyboardButton(text=BTN_ADD)],
-    ],
-    resize_keyboard=True,
-)
-
-# ---------------- Baza ----------------
+# ---------------- Baza (WAL rejimi bilan) ----------------
 os.makedirs(DATA_DIR, exist_ok=True)
-if DATA_DIR == ".":
-    log.warning("Volume ulanmagan: baza har deploydan keyin o'chib ketadi! Railway'da Volume (/data) qo'shing.")
 db = sqlite3.connect(os.path.join(DATA_DIR, "bot.db"), check_same_thread=False)
 db.row_factory = sqlite3.Row
+db.execute("PRAGMA journal_mode=WAL;")
+db.execute("PRAGMA synchronous=NORMAL;")
+
 db.executescript(
     """
 CREATE TABLE IF NOT EXISTS users(
     user_id INTEGER PRIMARY KEY,
+    full_name TEXT DEFAULT '',
     streak INTEGER DEFAULT 0,
     last_active TEXT,
     day TEXT,
@@ -80,17 +78,18 @@ CREATE TABLE IF NOT EXISTS questions(
     question TEXT,
     options TEXT,
     correct INTEGER,
+    box INTEGER DEFAULT 0,
     attempts INTEGER DEFAULT 0,
+    correct_count INTEGER DEFAULT 0,
     seen INTEGER DEFAULT 0,
     last_ok INTEGER DEFAULT 0,
     due INTEGER DEFAULT 0,
     last_ts INTEGER DEFAULT 0,
-    rep_day TEXT,
-    rep_ok INTEGER DEFAULT 0,
     UNIQUE(user_id, h)
 );
 CREATE TABLE IF NOT EXISTS sessions(
     user_id INTEGER PRIMARY KEY,
+    current_q_id INTEGER DEFAULT 0,
     remaining INTEGER,
     total INTEGER DEFAULT 0,
     ok INTEGER DEFAULT 0,
@@ -99,13 +98,15 @@ CREATE TABLE IF NOT EXISTS sessions(
 );
 """
 )
+
+# Eski bazadan migratsiya qilish
 for _sql in (
-    "ALTER TABLE questions ADD COLUMN last_ts INTEGER DEFAULT 0",
-    "ALTER TABLE sessions ADD COLUMN started INTEGER DEFAULT 0",
-    "ALTER TABLE questions ADD COLUMN rep_day TEXT",
-    "ALTER TABLE questions ADD COLUMN rep_ok INTEGER DEFAULT 0",
+    "ALTER TABLE users ADD COLUMN full_name TEXT DEFAULT ''",
+    "ALTER TABLE questions ADD COLUMN box INTEGER DEFAULT 0",
+    "ALTER TABLE questions ADD COLUMN correct_count INTEGER DEFAULT 0",
+    "ALTER TABLE sessions ADD COLUMN current_q_id INTEGER DEFAULT 0",
 ):
-    try:  # eski bazani yangilash
+    try:
         db.execute(_sql)
     except sqlite3.OperationalError:
         pass
@@ -120,10 +121,17 @@ def today():
     return now_dt().date().isoformat()
 
 
-def ensure_user(uid):
-    if not db.execute("SELECT 1 FROM users WHERE user_id=?", (uid,)).fetchone():
+def ensure_user(uid, full_name=""):
+    row = db.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
+    if not row:
         la = today() if now_dt().hour >= AUTO_HOUR else None
-        db.execute("INSERT INTO users(user_id,last_auto) VALUES(?,?)", (uid, la))
+        db.execute(
+            "INSERT INTO users(user_id, full_name, last_auto) VALUES(?,?,?)",
+            (uid, full_name, la),
+        )
+        db.commit()
+    elif full_name and row["full_name"] != full_name:
+        db.execute("UPDATE users SET full_name=? WHERE user_id=?", (full_name, uid))
         db.commit()
 
 
@@ -157,7 +165,7 @@ def bump_day(uid):
     db.commit()
 
 
-# ---------------- JSON parsing ----------------
+# ---------------- JSON Parsing ----------------
 LIST_KEYS = ("questions", "tests", "savollar", "data", "саволҳо", "саволхо", "тестҳо", "тестхо")
 Q_KEYS = ("question", "savol", "q", "text", "савол", "суол", "матн")
 O_KEYS = (
@@ -168,11 +176,10 @@ A_KEYS = (
     "answer", "correct", "togri", "to'g'ri", "correct_answer", "javob", "togri_javob",
     "ҷавоб", "чавоб", "дуруст", "ҷавоби_дуруст", "чавоби_дуруст", "ҷавоби дуруст", "рост",
 )
-CYR_LETTERS = "АБВГДЕ"  # тоҷикӣ/русӣ тартиби алифбо
+CYR_LETTERS = "АБВГДЕ"
 
 
 def norm(s):
-    """Unicode NFC + ortiqcha bo'shliqlarni tozalash (tojik harflari ҳ, ҷ, қ, ӯ, ӣ, ғ uchun)."""
     s = unicodedata.normalize("NFC", str(s)).replace("\u00a0", " ")
     return re.sub(r"\s+", " ", s).strip()
 
@@ -183,7 +190,7 @@ def decode_bytes(raw):
             return raw.decode(enc)
         except (UnicodeDecodeError, UnicodeError):
             continue
-    raise ValueError("fayl kodirovkasi noma'lum (UTF-8 ishlating)")
+    raise ValueError("Fayl kodirovkasi noma'lum (UTF-8 ishlating)")
 
 
 def pick(d, keys):
@@ -257,22 +264,8 @@ def parse_items(data):
 
 
 def qhash(q):
-    """Savolni solishtirish kaliti: harf/raqamlar, kichik harf (bo'shliq, tinish belgisi, registr farqi hisobga olinmaydi)."""
     t = "".join(ch for ch in norm(q).lower() if ch.isalnum())
     return hashlib.sha1(t.encode()).hexdigest()
-
-
-def migrate_hashes():
-    """Eski savollarni yangi kalit bilan yangilaydi; takroriylari o'chiriladi."""
-    for r in db.execute("SELECT id, user_id, question, h FROM questions ORDER BY id").fetchall():
-        h = qhash(r["question"])
-        if h == r["h"]:
-            continue
-        try:
-            db.execute("UPDATE questions SET h=? WHERE id=?", (h, r["id"]))
-        except sqlite3.IntegrityError:
-            db.execute("DELETE FROM questions WHERE id=?", (r["id"],))
-    db.commit()
 
 
 def add_questions(uid, items):
@@ -281,7 +274,7 @@ def add_questions(uid, items):
         h = qhash(q)
         try:
             db.execute(
-                "INSERT INTO questions(user_id,h,question,options,correct) VALUES(?,?,?,?,?)",
+                "INSERT INTO questions(user_id,h,question,options,correct,box,due) VALUES(?,?,?,?,?,0,0)",
                 (uid, h, q, json.dumps(opts, ensure_ascii=False), correct),
             )
             added += 1
@@ -291,28 +284,80 @@ def add_questions(uid, items):
     return added, dup
 
 
-# ---------------- Test sessiyasi ----------------
-def wrong_count(uid):
-    return db.execute(
-        "SELECT COUNT(*) c FROM questions WHERE user_id=? AND seen=1 AND last_ok=0", (uid,)
-    ).fetchone()["c"]
+# ---------------- Ebbinghaus + Leitner Core Logikasi ----------------
+def apply_leitner_answer(uid, qid, is_ok):
+    q = db.execute("SELECT * FROM questions WHERE id=? AND user_id=?", (qid, uid)).fetchone()
+    if not q:
+        return None
+    now_ts = int(time.time())
+    old_box = q["box"] or 0
+    if is_ok:
+        new_box = min(old_box + 1, 5)
+    else:
+        new_box = 0  # Ebbinghaus reset: xato qilinsa 0-qutiga qaytadi
+
+    interval = LEITNER_INTERVALS[new_box]
+    next_due = now_ts + interval
+
+    db.execute(
+        """UPDATE questions SET 
+           box=?, attempts=attempts+1, correct_count=correct_count+?, 
+           seen=1, last_ok=?, due=?, last_ts=? 
+           WHERE id=?""",
+        (new_box, 1 if is_ok else 0, 1 if is_ok else 0, next_due, now_ts, qid),
+    )
+    db.commit()
+    touch_streak(uid)
+    return {"old_box": old_box, "new_box": new_box, "next_due": next_due}
 
 
-def pick_question(uid, mode=None, started=0):
+def pick_question(uid, mode="due", exclude_ids=None):
+    exclude_ids = exclude_ids or []
+    placeholders = ",".join("?" * len(exclude_ids)) if exclude_ids else "0"
+    now_ts = int(time.time())
+
     if mode == "wrong":
-        # xato qilingan testlar muddatidan qat'i nazar; shu sessiyada ishlanganlari qaytmaydi
-        return db.execute(
-            "SELECT * FROM questions WHERE user_id=? AND seen=1 AND last_ok=0 AND last_ts<? "
-            "ORDER BY RANDOM() LIMIT 1",
-            (uid, started),
-        ).fetchone()
-    return db.execute(
-        "SELECT * FROM questions WHERE user_id=? AND due<=? ORDER BY seen ASC, RANDOM() LIMIT 1",
-        (uid, int(time.time())),
-    ).fetchone()
+        query = f"""
+            SELECT * FROM questions 
+            WHERE user_id=? AND seen=1 AND last_ok=0 AND id NOT IN ({placeholders})
+            ORDER BY last_ts ASC, RANDOM() LIMIT 1
+        """
+        return db.execute(query, (uid, *exclude_ids)).fetchone()
+
+    # Avval muddati kelgan (due <= now) va eng kichik qutidagi (box ASC) savollar olinadi
+    query = f"""
+        SELECT * FROM questions 
+        WHERE user_id=? AND due<=? AND id NOT IN ({placeholders})
+        ORDER BY box ASC, seen ASC, RANDOM() LIMIT 1
+    """
+    return db.execute(query, (uid, now_ts, *exclude_ids)).fetchone()
 
 
-async def send_question(bot, chat_id, q):
+# ---------------- Bot Klaviaturasi ----------------
+BTN_WORK = "📝 Test ishlash"
+BTN_WRONG = "❌ Xatolarni ishlash"
+BTN_ADD = "➕ Test qo'shish"
+BTN_STATS = "📊 Statistika"
+
+
+def get_menu():
+    rows = [
+        [KeyboardButton(text=BTN_WORK), KeyboardButton(text=BTN_WRONG)],
+        [KeyboardButton(text=BTN_ADD), KeyboardButton(text=BTN_STATS)],
+    ]
+    if WEBAPP_URL:
+        rows.insert(
+            0,
+            [KeyboardButton(text="🚀 Mini App (Profil & Leitner)", web_app=WebAppInfo(url=WEBAPP_URL))],
+        )
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+
+# ---------------- Telegram Bot Handlers ----------------
+router = Router()
+
+
+async def send_question_msg(bot, chat_id, uid, q):
     opts = json.loads(q["options"])
     order = list(range(len(opts)))
     random.shuffle(order)
@@ -323,21 +368,10 @@ async def send_question(bot, chat_id, q):
             for p, i in enumerate(order)
         ]
     )
-    await bot.send_message(chat_id, f"❓ {q['question']}", reply_markup=kb)
-
-
-async def finish_session(bot, chat_id, uid, note=None):
-    s = db.execute("SELECT * FROM sessions WHERE user_id=?", (uid,)).fetchone()
-    db.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
+    db.execute("UPDATE sessions SET current_q_id=? WHERE user_id=?", (q["id"], uid))
     db.commit()
-    if s and s["total"]:
-        pct = round(s["ok"] / s["total"] * 100)
-        await bot.send_message(
-            chat_id,
-            f"🏁 Sessiya tugadi: {s['ok']}/{s['total']} to'g'ri ({pct}%)\n🔥 Kun seriyasi: {streak_now(uid)}",
-        )
-    elif note:
-        await bot.send_message(chat_id, note)
+    box_badge = f"📦 Quti {q['box']}/5"
+    await bot.send_message(chat_id, f"❓ <b>{q['question']}</b>\n<i>{box_badge}</i>", reply_markup=kb, parse_mode="HTML")
 
 
 async def send_next(bot, chat_id, uid):
@@ -345,114 +379,92 @@ async def send_next(bot, chat_id, uid):
     if not s:
         return
     if s["remaining"] <= 0:
-        return await finish_session(bot, chat_id, uid)
-    q = pick_question(uid, s["mode"], s["started"])
+        db.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
+        db.commit()
+        pct = round(s["ok"] / s["total"] * 100) if s["total"] else 0
+        return await bot.send_message(
+            chat_id,
+            f"🏁 Sessiya tugadi: <b>{s['ok']}/{s['total']}</b> ({pct}%)\n🔥 Kun seriyasi: <b>{streak_now(uid)}</b>",
+            parse_mode="HTML",
+        )
+
+    # Shu sessiya davomida ishlangan savollarni qaytarmaslik uchun
+    recent_rows = db.execute(
+        "SELECT id FROM questions WHERE user_id=? AND last_ts>=?", (uid, s["started"])
+    ).fetchall()
+    exclude = [r["id"] for r in recent_rows]
+
+    q = pick_question(uid, s["mode"], exclude)
     if not q:
-        note = "Xato testlar qolmadi 🎉" if s["mode"] == "wrong" else "Hozircha takrorlanadigan test qolmadi 🎉"
-        return await finish_session(bot, chat_id, uid, note)
-    await send_question(bot, chat_id, q)
+        db.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
+        db.commit()
+        return await bot.send_message(chat_id, "🎉 Hozircha takrorlanadigan savollar qolmadi!")
+
     db.execute("UPDATE sessions SET remaining=remaining-1 WHERE user_id=?", (uid,))
     db.commit()
-    if s["mode"] == "manual":
-        bump_day(uid)
+    await send_question_msg(bot, chat_id, uid, q)
 
 
 async def start_session(bot, chat_id, uid, mode):
     ensure_user(uid)
     started = int(time.time())
-    if mode == "wrong":
-        n = wrong_count(uid)
-        if n == 0:
-            return await bot.send_message(chat_id, "Xato qilingan test yo'q 🎉")
-    elif mode == "manual":
+    if mode == "manual":
         n = DAILY_LIMIT - day_count(uid)
         if n <= 0:
             return await bot.send_message(chat_id, f"Bugungi {DAILY_LIMIT} ta limit tugadi. Ertaga davom etamiz 💪")
+    elif mode == "wrong":
+        n = db.execute("SELECT COUNT(*) c FROM questions WHERE user_id=? AND seen=1 AND last_ok=0", (uid,)).fetchone()["c"]
+        if n == 0:
+            return await bot.send_message(chat_id, "Xato qilingan savollar yo'q 🎉")
     else:
         n = AUTO_COUNT
-    if not pick_question(uid, mode, started):
-        if mode == "manual":
-            total = db.execute("SELECT COUNT(*) c FROM questions WHERE user_id=?", (uid,)).fetchone()["c"]
-            msg = "Avval test qo'shing: ➕ Test qo'shish." if total == 0 else "Hozircha takrorlanadigan test yo'q. Keyinroq urinib ko'ring."
-            await bot.send_message(chat_id, msg)
-        return
+
+    if not pick_question(uid, mode):
+        return await bot.send_message(chat_id, "Hozircha takrorlash vaqti kelgan savollar yo'q. Keyinroq kiring!")
+
     db.execute(
-        "INSERT OR REPLACE INTO sessions(user_id,remaining,total,ok,mode,started) VALUES(?,?,0,0,?,?)",
+        "INSERT OR REPLACE INTO sessions(user_id,current_q_id,remaining,total,ok,mode,started) VALUES(?,0,?,0,0,?,?)",
         (uid, n, mode, started),
     )
     db.commit()
-    if mode == "wrong":
-        await bot.send_message(chat_id, f"❌ Xato qilingan {n} ta test boshlandi!")
-    if mode == "auto":
-        await bot.send_message(chat_id, f"⏰ Kunlik {AUTO_COUNT} ta test boshlandi!")
     await send_next(bot, chat_id, uid)
-
-
-# ---------------- Progress rasmi ----------------
-def font(size):
-    for p in ("DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"):
-        try:
-            return ImageFont.truetype(p, size)
-        except OSError:
-            pass
-    return ImageFont.load_default(size=size)
-
-
-def battery_png(pct, done, total, title="Progress", label="ta o'rganildi"):
-    col = (220, 53, 69) if pct < 34 else (255, 159, 28) if pct < 67 else (40, 180, 99)
-    dark = (40, 44, 52)
-    img = Image.new("RGB", (1000, 640), (245, 247, 250))
-    d = ImageDraw.Draw(img)
-    d.text((500, 60), title, font=font(52), fill=dark, anchor="mm")
-    d.rounded_rectangle((100, 130, 820, 380), radius=40, outline=dark, width=12)
-    d.rounded_rectangle((832, 200, 884, 310), radius=14, fill=dark)
-    x0, x1, y0, y1 = 130, 790, 160, 350
-    fw = int((x1 - x0) * pct / 100)
-    if fw > 0:
-        d.rounded_rectangle((x0, y0, x0 + max(fw, 24), y1), radius=20, fill=col)
-    d.text((500, 480), f"{pct:.0f}%", font=font(120), fill=col, anchor="mm")
-    d.text((500, 580), f"{done} / {total} {label}", font=font(44), fill=(100, 106, 118), anchor="mm")
-    buf = io.BytesIO()
-    img.save(buf, "PNG")
-    return buf.getvalue()
-
-
-# ---------------- Handlers ----------------
-router = Router()
 
 
 @router.message(CommandStart())
 async def cmd_start(m: Message):
-    ensure_user(m.from_user.id)
+    ensure_user(m.from_user.id, m.from_user.full_name)
+    inline = None
+    if WEBAPP_URL:
+        inline = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="✨ Mini App ni ochish", web_app=WebAppInfo(url=WEBAPP_URL))]]
+        )
     await m.answer(
-        "Salom! 👋 Test botiga xush kelibsiz.\n\n"
-        "➕ Test qo'shish — .json fayl yuboring\n"
-        "📝 Test ishlash — kuniga 50 tagacha\n"
-        f"⏰ Har kuni soat {AUTO_HOUR}:00 da {AUTO_COUNT} ta test avtomatik keladi.",
-        reply_markup=MENU,
+        f"Salom, <b>{m.from_user.first_name}</b>! 👋\n\n"
+        "Bu bot <b>Ebbinghaus xotira egri chizig'i</b> va <b>Leitner qutilari</b> asosida so'z va testlarni abadiy yodlashga yordam beradi.\n\n"
+        "🚀 To'liq vizual statistika, profil va qulay test ishlash uchun <b>Mini App</b> tugmasini bosing!",
+        reply_markup=get_menu(),
+        parse_mode="HTML",
     )
+    if inline:
+        await m.answer("Tezkor kirish:", reply_markup=inline)
 
 
 @router.message(F.text == BTN_ADD)
 async def btn_add(m: Message):
-    ensure_user(m.from_user.id)
     await m.answer(
-        "📎 .json faylni shu yerga yuboring.\n\n"
-        "Format:\n"
-        '[{"question": "Apple?", "options": ["Olma", "Nok", "Uzum", "Anor"], "answer": "Olma"}]\n\n'
-        "answer: variant matni, harf (A–D) yoki raqam (1–4) bo'lishi mumkin."
+        "📎 <b>.json</b> fayl yuboring yoki Mini App orqali matn ko'rinishida qo'shing.\n\n"
+        "<code>[{\"question\": \"Abandon\", \"options\": [\"Tark etmoq\", \"Qabul qilmoq\", \"Yugurmoq\", \"O'ylamoq\"], \"answer\": \"Tark etmoq\"}]</code>",
+        parse_mode="HTML",
     )
 
 
 @router.message(F.document)
 async def on_document(m: Message, bot: Bot):
     uid = m.from_user.id
-    ensure_user(uid)
+    ensure_user(uid, m.from_user.full_name)
     doc = m.document
     if not (doc.file_name or "").lower().endswith(".json"):
         return await m.answer("Iltimos, .json fayl yuboring.")
-    if doc.file_size and doc.file_size > 5 * 1024 * 1024:
-        return await m.answer("Fayl juda katta (5 MB gacha).")
     buf = io.BytesIO()
     await bot.download(doc, destination=buf)
     try:
@@ -461,73 +473,24 @@ async def on_document(m: Message, bot: Bot):
     except Exception as e:
         return await m.answer(f"❌ Faylni o'qib bo'lmadi: {e}")
     added, dup = add_questions(uid, items)
-    text = f"✅ Qo'shildi: {added}\n♻️ Avval qo'shilgan (hisobga olinmadi): {dup}"
-    if errors:
-        text += f"\n⚠️ Xato savollar: {len(errors)}\n" + "\n".join(errors[:5])
-    await m.answer(text)
+    await m.answer(f"✅ Qo'shildi: <b>{added}</b>\n♻️ Takroriy: <b>{dup}</b>\n⚠️ Xato: <b>{len(errors)}</b>", parse_mode="HTML")
 
 
-@router.message(F.text == BTN_COUNT)
-async def btn_count(m: Message):
+@router.message(F.text == BTN_STATS)
+async def btn_stats(m: Message):
     uid = m.from_user.id
-    ensure_user(uid)
+    ensure_user(uid, m.from_user.full_name)
+    now_ts = int(time.time())
     total = db.execute("SELECT COUNT(*) c FROM questions WHERE user_id=?", (uid,)).fetchone()["c"]
-    due = db.execute(
-        "SELECT COUNT(*) c FROM questions WHERE user_id=? AND due<=?", (uid, int(time.time()))
-    ).fetchone()["c"]
+    due = db.execute("SELECT COUNT(*) c FROM questions WHERE user_id=? AND due<=?", (uid, now_ts)).fetchone()["c"]
+    mastered = db.execute("SELECT COUNT(*) c FROM questions WHERE user_id=? AND box>=4", (uid,)).fetchone()["c"]
     await m.answer(
-        f"📊 Jami testlar: {total}\n"
-        f"🔁 Hozir ishlash mumkin: {due}\n"
-        f"❌ Xato qilingan: {wrong_count(uid)}\n"
-        f"📅 Bugun ishlangan (tugma orqali): {day_count(uid)}/{DAILY_LIMIT}\n"
-        f"🔥 Kun seriyasi: {streak_now(uid)}"
-    )
-
-
-@router.message(F.text == BTN_PROGRESS)
-async def btn_progress(m: Message):
-    uid = m.from_user.id
-    ensure_user(uid)
-    r = db.execute(
-        "SELECT COUNT(*) t, COALESCE(SUM(last_ok),0) ok FROM questions WHERE user_id=?", (uid,)
-    ).fetchone()
-    total, done = r["t"], r["ok"]
-    pct = done / total * 100 if total else 0
-    await m.answer_photo(
-        BufferedInputFile(battery_png(pct, done, total), "progress.png"),
-        caption=(
-            f"📈 {pct:.0f}% — {done}/{total} ta test o'rganildi\n🔥 Kun seriyasi: {streak_now(uid)}"
-            if total
-            else "Hali test yo'q. Avval ➕ Test qo'shish."
-        ),
-    )
-
-    # 2-rasm: takrorlanishi kerak bo'lgan testlar (to'g'ri ishlangan, vaqti kelgan)
-    t = today()
-    pending = db.execute(
-        "SELECT COUNT(*) c FROM questions WHERE user_id=? AND last_ok=1 AND due<=?",
-        (uid, int(time.time())),
-    ).fetchone()["c"]
-    r = db.execute(
-        "SELECT COUNT(*) c, COALESCE(SUM(rep_ok),0) ok FROM questions WHERE user_id=? AND rep_day=?",
-        (uid, t),
-    ).fetchone()
-    cohort = pending + r["c"]
-    rdone = r["ok"]
-    if cohort == 0:
-        rp, caption = 100, "✅ Takrorlanishi kerak bo'lgan test yo'q, ertaga keling."
-    else:
-        rp = rdone / cohort * 100
-        caption = (
-            f"🔁 Takrorlash: {rp:.0f}% — {rdone}/{cohort} ta\n"
-            f"⏳ Hali takrorlanmagan: {pending} ta\n"
-            "📝 Test ishlash tugmasi bilan takrorlang."
-        )
-    await m.answer_photo(
-        BufferedInputFile(
-            battery_png(rp, rdone, cohort, "Takrorlash", "ta takrorlandi"), "repeat.png"
-        ),
-        caption=caption,
+        f"📊 <b>Statistika:</b>\n\n"
+        f"📚 Jami savollar: <b>{total}</b>\n"
+        f"⏳ Takrorlash vaqti kelgan: <b>{due}</b>\n"
+        f"🏆 Mustahkam yodlangan (Box 4-5): <b>{mastered}</b>\n"
+        f"🔥 Kun seriyasi: <b>{streak_now(uid)}</b>",
+        parse_mode="HTML",
     )
 
 
@@ -541,20 +504,22 @@ async def btn_wrong(m: Message, bot: Bot):
     await start_session(bot, m.chat.id, m.from_user.id, "wrong")
 
 
-@router.callback_query(F.data == "n")
-async def noop(cb: CallbackQuery):
-    await cb.answer()
-
-
 @router.callback_query(F.data.startswith("a:"))
 async def on_answer(cb: CallbackQuery, bot: Bot):
     uid = cb.from_user.id
-    _, qid, pos, perm = cb.data.split(":")
-    q = db.execute("SELECT * FROM questions WHERE id=? AND user_id=?", (int(qid), uid)).fetchone()
+    _, qid_s, pos_s, perm = cb.data.split(":")
+    qid, pos = int(qid_s), int(pos_s)
+
+    # Double-click himoyasi
+    sess = db.execute("SELECT * FROM sessions WHERE user_id=?", (uid,)).fetchone()
+    if sess and sess["current_q_id"] != qid:
+        return await cb.answer("Bu savolga allaqachon javob berilgan!")
+
+    q = db.execute("SELECT * FROM questions WHERE id=? AND user_id=?", (qid, uid)).fetchone()
     if not q:
         return await cb.answer("Savol topilmadi")
+
     opts = json.loads(q["options"])
-    pos = int(pos)
     correct = q["correct"]
     ok = int(perm[pos]) == correct
 
@@ -562,35 +527,183 @@ async def on_answer(cb: CallbackQuery, bot: Bot):
     for p, ch in enumerate(perm):
         i = int(ch)
         mark = "🟢 " if i == correct else ("🔴 " if p == pos else "")
-        rows.append([InlineKeyboardButton(text=mark + opts[i], callback_data="n")])
+        rows.append([InlineKeyboardButton(text=mark + opts[i], callback_data="noop")])
     try:
         await cb.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     except Exception:
         pass
 
-    days = REPEAT_DAYS if ok else WRONG_REPEAT_DAYS
-    now_ts = int(time.time())
-    t = today()
-    rep_day, rep_ok = q["rep_day"], q["rep_ok"]
-    if q["last_ok"] == 1 and q["due"] <= now_ts:  # takrorlanishi kerak bo'lgan test
-        rep_day, rep_ok = t, 1 if ok else 0
-    elif ok and rep_day == t:
-        rep_ok = 1
-    db.execute(
-        "UPDATE questions SET attempts=attempts+1, seen=1, last_ok=?, due=?, last_ts=?, "
-        "rep_day=?, rep_ok=? WHERE id=?",
-        (1 if ok else 0, now_ts + days * 86400, now_ts, rep_day, rep_ok, q["id"]),
-    )
-    db.execute(
-        "UPDATE sessions SET total=total+1, ok=ok+? WHERE user_id=?", (1 if ok else 0, uid)
-    )
-    db.commit()
-    touch_streak(uid)
-    await cb.answer("✅ To'g'ri!" if ok else "❌ Xato")
+    res = apply_leitner_answer(uid, qid, ok)
+    if sess:
+        db.execute(
+            "UPDATE sessions SET current_q_id=0, total=total+1, ok=ok+? WHERE user_id=?",
+            (1 if ok else 0, uid),
+        )
+        if sess["mode"] == "manual":
+            bump_day(uid)
+        db.commit()
+
+    box_msg = f"📦 Quti: {res['old_box']} ➔ {res['new_box']}" if res else ""
+    await cb.answer(f"{'✅ To\'g\'ri!' if ok else '❌ Xato!'} {box_msg}")
     await send_next(bot, cb.message.chat.id, uid)
 
 
-# ---------------- Avtomatik kunlik test ----------------
+@router.callback_query(F.data == "noop")
+async def noop(cb: CallbackQuery):
+    await cb.answer()
+
+
+# ---------------- Mini App Xavfsizlik va REST API ----------------
+def verify_telegram_webapp(init_data: str) -> dict | None:
+    if not init_data:
+        return None
+    parsed = dict(parse_qsl(init_data, strict_parsing=False))
+    received_hash = parsed.pop("hash", None)
+    if not received_hash:
+        return None
+    data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(parsed.items()))
+    secret_key = hmac.new(b"WebAppData", TOKEN.encode(), hashlib.sha256).digest()
+    calculated_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(calculated_hash, received_hash):
+        return None
+    return json.loads(parsed.get("user", "{}"))
+
+
+def get_api_user(request: web.Request) -> dict | None:
+    init_data = request.headers.get("X-Telegram-Init-Data", "")
+    user = verify_telegram_webapp(init_data)
+    if user and "id" in user:
+        full_name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
+        ensure_user(user["id"], full_name)
+        return user
+    return None
+
+
+async def handle_index(request: web.Request):
+    html_path = os.path.join(os.path.dirname(__file__), "webapp.html")
+    return web.FileResponse(html_path)
+
+
+async def api_dashboard(request: web.Request):
+    user = get_api_user(request)
+    if not user:
+        return web.json_response({"error": "Unauthorized"}, status=401)
+    uid = user["id"]
+    now_ts = int(time.time())
+
+    total = db.execute("SELECT COUNT(*) c FROM questions WHERE user_id=?", (uid,)).fetchone()["c"]
+    due = db.execute("SELECT COUNT(*) c FROM questions WHERE user_id=? AND due<=?", (uid, now_ts)).fetchone()["c"]
+    wrong = db.execute("SELECT COUNT(*) c FROM questions WHERE user_id         "=? AND seen=1 AND last_ok=0", (uid,)
+    ).fetchone()["c"]
+
+    agg = db.execute(
+        "SELECT COALESCE(SUM(attempts),0) att, COALESCE(SUM(correct_count),0) cor FROM questions WHERE user_id=?",
+        (uid,),
+    ).fetchone()
+    accuracy = round((agg["cor"] / agg["att"]) * 100) if agg["att"] > 0 else 0
+
+    boxes = {str(i): 0 for i in range(6)}
+    for r in db.execute(
+        "SELECT box, COUNT(*) c FROM questions WHERE user_id=? GROUP BY box", (uid,)
+    ).fetchall():
+        boxes[str(r["box"])] = r["c"]
+
+    return web.json_response({
+        "user": {
+            "id": uid,
+            "name": f"{user.get('first_name', '')} {user.get('last_name', '')}".strip(),
+            "username": user.get("username", ""),
+            "streak": streak_now(uid),
+            "today_done": day_count(uid),
+            "daily_limit": DAILY_LIMIT,
+        },
+        "stats": {
+            "total": total,
+            "due": due,
+            "wrong": wrong,
+            "accuracy": accuracy,
+            "attempts": agg["att"],
+            "boxes": boxes,
+        },
+    })
+
+
+async def api_next_question(request: web.Request):
+    user = get_api_user(request)
+    if not user:
+        return web.json_response({"error": "Unauthorized"}, status=401)
+    uid = user["id"]
+    mode = request.query.get("mode", "due")
+    exclude_raw = request.query.get("exclude", "")
+    exclude = [int(x) for x in exclude_raw.split(",") if x.isdigit()]
+
+    q = pick_question(uid, mode, exclude)
+    if not q:
+        return web.json_response({"question": None})
+
+    opts = json.loads(q["options"])
+    indexed_opts = list(enumerate(opts))
+    random.shuffle(indexed_opts)
+
+    return web.json_response({
+        "question": {
+            "id": q["id"],
+            "text": q["question"],
+            "box": q["box"],
+            "options": [{"idx": idx, "text": txt} for idx, txt in indexed_opts],
+        }
+    })
+
+
+async def api_submit_answer(request: web.Request):
+    user = get_api_user(request)
+    if not user:
+        return web.json_response({"error": "Unauthorized"}, status=401)
+    uid = user["id"]
+    body = await request.json()
+    qid = int(body.get("question_id", 0))
+    chosen_idx = int(body.get("option_idx", -1))
+
+    q = db.execute("SELECT * FROM questions WHERE id=? AND user_id=?", (qid, uid)).fetchone()
+    if not q:
+        return web.json_response({"error": "Not found"}, status=404)
+
+    is_ok = chosen_idx == q["correct"]
+    res = apply_leitner_answer(uid, qid, is_ok)
+    bump_day(uid)
+
+    return web.json_response({
+        "is_ok": is_ok,
+        "correct_idx": q["correct"],
+        "old_box": res["old_box"],
+        "new_box": res["new_box"],
+        "streak": streak_now(uid),
+    })
+
+
+async def api_import_json(request: web.Request):
+    user = get_api_user(request)
+    if not user:
+        return web.json_response({"error": "Unauthorized"}, status=401)
+    uid = user["id"]
+    body = await request.json()
+    raw_text = body.get("json_text", "")
+    try:
+        data = json.loads(raw_text)
+        items, errors = parse_items(data)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=400)
+
+    added, dup = add_questions(uid, items)
+    return web.json_response({
+        "added": added,
+        "dup": dup,
+        "errors_count": len(errors),
+        "errors": errors[:5],
+    })
+
+
+# ---------------- Avtomatik Scheduler & Main ----------------
 async def scheduler(bot: Bot):
     while True:
         try:
@@ -609,17 +722,30 @@ async def scheduler(bot: Bot):
                     try:
                         await start_session(bot, uid, uid, "auto")
                     except Exception as e:
-                        log.warning("auto test failed for %s: %s", uid, e)
+                        log.warning("Auto test failed for %s: %s", uid, e)
         except Exception as e:
-            log.exception("scheduler error: %s", e)
+            log.exception("Scheduler error: %s", e)
         await asyncio.sleep(30)
 
 
 async def main():
-    migrate_hashes()
     bot = Bot(TOKEN)
     dp = Dispatcher()
     dp.include_router(router)
+
+    app = web.Application()
+    app.router.add_get("/", handle_index)
+    app.router.add_get("/api/dashboard", api_dashboard)
+    app.router.add_get("/api/question", api_next_question)
+    app.router.add_post("/api/answer", api_submit_answer)
+    app.router.add_post("/api/import", api_import_json)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    log.info("WebApp server running on port %s", PORT)
+
     asyncio.create_task(scheduler(bot))
     await dp.start_polling(bot)
 
