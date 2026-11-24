@@ -11,7 +11,7 @@ import sqlite3
 import time
 import unicodedata
 from datetime import datetime, timedelta
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, quote
 from zoneinfo import ZoneInfo
 
 from aiohttp import web
@@ -28,7 +28,7 @@ from aiogram.types import (
 )
 
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("leitner_pro_ru")
+log = logging.getLogger("leitner_auto_sub")
 
 TOKEN = os.environ["BOT_TOKEN"]
 WEBAPP_URL = os.getenv("WEBAPP_URL", "").rstrip("/")
@@ -42,6 +42,9 @@ TZ = ZoneInfo(os.getenv("BOT_TZ", "Asia/Tashkent"))
 
 BASE_PERSONAL_LIMIT = 30
 REFERRAL_BONUS_LIMIT = 50
+SCORE_CORRECT = 10
+SCORE_WRONG = -5
+SUB_WATCH_SECONDS = 10
 AUTO_HOUR = 16
 AUTO_COUNT = 10
 DAILY_LIMIT = 50
@@ -68,9 +71,6 @@ LEITNER_INTERVALS = {
 }
 
 os.makedirs(DATA_DIR, exist_ok=True)
-if DATA_DIR == ".":
-    log.warning("Том не подключён: база будет сбрасываться при каждом деплое! Подключите Volume (/data) в Railway.")
-
 db = sqlite3.connect(os.path.join(DATA_DIR, "bot.db"), check_same_thread=False)
 db.row_factory = sqlite3.Row
 db.execute("PRAGMA journal_mode=WAL;")
@@ -85,11 +85,18 @@ CREATE TABLE IF NOT EXISTS users(
     referred_by INTEGER,
     referral_count INTEGER DEFAULT 0,
     bonus_limit INTEGER DEFAULT 0,
+    score INTEGER DEFAULT 0,
     streak INTEGER DEFAULT 0,
     last_active TEXT,
     day TEXT,
     day_count INTEGER DEFAULT 0,
     last_auto TEXT
+);
+CREATE TABLE IF NOT EXISTS mandatory_channels(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT DEFAULT '',
+    chat_ref TEXT NOT NULL,
+    url TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS questions(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -134,6 +141,7 @@ for _sql in (
     "ALTER TABLE users ADD COLUMN referred_by INTEGER",
     "ALTER TABLE users ADD COLUMN referral_count INTEGER DEFAULT 0",
     "ALTER TABLE users ADD COLUMN bonus_limit INTEGER DEFAULT 0",
+    "ALTER TABLE users ADD COLUMN score INTEGER DEFAULT 0",
     "ALTER TABLE questions ADD COLUMN scope TEXT DEFAULT 'personal'",
     "ALTER TABLE questions ADD COLUMN box INTEGER DEFAULT 0",
     "ALTER TABLE questions ADD COLUMN correct_count INTEGER DEFAULT 0",
@@ -145,6 +153,10 @@ for _sql in (
     except sqlite3.OperationalError:
         pass
 db.commit()
+
+# Foydalanuvchi uchun 10 soniyalik avtomatik kuzatuv holati (chat va mini app)
+watch_tasks: dict[tuple[str, int], asyncio.Task] = {}
+webapp_watch_state: dict[int, dict] = {}
 
 
 def is_admin(uid: int) -> bool:
@@ -178,10 +190,8 @@ def ensure_user(uid: int, full_name: str = "", username: str = "", ref_by: int |
         la = today() if now_dt().hour >= AUTO_HOUR else None
         valid_ref = None
         if ref_by and ref_by != uid:
-            ref_exists = db.execute("SELECT user_id FROM users WHERE user_id=?", (ref_by,)).fetchone()
-            if ref_exists:
+            if db.execute("SELECT user_id FROM users WHERE user_id=?", (ref_by,)).fetchone():
                 valid_ref = ref_by
-
         db.execute(
             "INSERT INTO users(user_id, full_name, username, referred_by, last_auto) VALUES(?,?,?,?,?)",
             (uid, full_name, username, valid_ref, la),
@@ -194,20 +204,19 @@ def ensure_user(uid: int, full_name: str = "", username: str = "", ref_by: int |
         db.commit()
         sync_global_questions_for_user(uid)
         return True
-    else:
-        updates = []
-        params = []
-        if full_name and row["full_name"] != full_name:
-            updates.append("full_name=?")
-            params.append(full_name)
-        if username and row["username"] != username:
-            updates.append("username=?")
-            params.append(username)
-        if updates:
-            params.append(uid)
-            db.execute(f"UPDATE users SET {', '.join(updates)} WHERE user_id=?", params)
-            db.commit()
-        return False
+
+    updates, params = [], []
+    if full_name and row["full_name"] != full_name:
+        updates.append("full_name=?")
+        params.append(full_name)
+    if username and row["username"] != username:
+        updates.append("username=?")
+        params.append(username)
+    if updates:
+        params.append(uid)
+        db.execute(f"UPDATE users SET {', '.join(updates)} WHERE user_id=?", params)
+        db.commit()
+    return False
 
 
 def touch_streak(uid: int):
@@ -260,6 +269,115 @@ def personal_remaining(uid: int) -> int:
     if is_admin(uid):
         return 999999
     return max(0, personal_limit(uid) - personal_count(uid))
+
+
+def get_user_score(uid: int) -> int:
+    u = db.execute("SELECT score FROM users WHERE user_id=?", (uid,)).fetchone()
+    return int(u["score"]) if u and u["score"] is not None else 0
+
+
+def apply_score_delta(uid: int, delta: int) -> int:
+    new_score = max(0, get_user_score(uid) + delta)
+    db.execute("UPDATE users SET score=? WHERE user_id=?", (new_score, uid))
+    db.commit()
+    return new_score
+
+
+def normalize_channel_input(raw_chat: str, raw_url: str = "", raw_title: str = "") -> tuple[str, str, str]:
+    c = (raw_chat or "").strip()
+    u = (raw_url or "").strip()
+    t = (raw_title or "").strip()
+    if not c:
+        raise ValueError("Укажите канал (@username, ссылку или ID канала)")
+
+    m = re.match(r"^https?://(?:t\.me|telegram\.me)/([A-Za-z0-9_]+)/?$", c)
+    if m:
+        uname = m.group(1)
+        c = f"@{uname}"
+        if not u:
+            u = f"https://t.me/{uname}"
+
+    if re.match(r"^@[A-Za-z0-9_]{3,}$", c):
+        if not u:
+            u = f"https://t.me/{c[1:]}"
+    elif re.match(r"^-100\d+$", c):
+        if not u:
+            raise ValueError("Для числового ID канала укажите ссылку https://t.me/...")
+    else:
+        raise ValueError("Некорректный формат канала. Используйте @username, ссылку или -100...")
+
+    if not re.match(r"^https?://", u):
+        raise ValueError("Ссылка должна начинаться с https://")
+    return (t or c), c, u
+
+
+def list_mandatory_channels() -> list[dict]:
+    rows = db.execute("SELECT id, title, chat_ref, url FROM mandatory_channels ORDER BY id ASC").fetchall()
+    return [dict(r) for r in rows]
+
+
+async def check_user_subscriptions(bot: Bot, uid: int) -> tuple[bool, list[dict]]:
+    if is_admin(uid):
+        return True, []
+    channels = list_mandatory_channels()
+    if not channels:
+        return True, []
+
+    missing = []
+    allowed = {"member", "administrator", "creator"}
+    for ch in channels:
+        target = int(ch["chat_ref"]) if re.match(r"^-100\d+$", ch["chat_ref"]) else ch["chat_ref"]
+        try:
+            member = await bot.get_chat_member(chat_id=target, user_id=uid)
+            if getattr(member, "status", "") not in allowed:
+                missing.append(ch)
+        except Exception as e:
+            log.warning("Ошибка проверки подписки на %s для %s: %s", ch["chat_ref"], uid, e)
+            missing.append(ch)
+    return (len(missing) == 0), missing
+
+
+def build_subscribe_keyboard(missing_channels: list[dict]) -> InlineKeyboardMarkup:
+    rows = []
+    for ch in missing_channels:
+        rows.append([
+            InlineKeyboardButton(
+                text=f"📢 Подписаться: {ch['title']}",
+                url=ch["url"],
+                callback_data=f"sublink:{ch['id']}",
+            )
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+async def run_chat_subscription_watch(bot: Bot, chat_id: int, uid: int):
+    key = ("chat", uid)
+    try:
+        for _ in range(SUB_WATCH_SECONDS):
+            await asyncio.sleep(1)
+            ok_sub, _ = await check_user_subscriptions(bot, uid)
+            if ok_sub:
+                await bot.send_message(
+                    chat_id,
+                    "✅ <b>Вы подписались! Доступ к боту открыт.</b>",
+                    reply_markup=get_menu(),
+                    parse_mode="HTML",
+                )
+                return
+        await bot.send_message(
+            chat_id,
+            f"⏱ Вы не подписались за {SUB_WATCH_SECONDS} секунд. Перейдите по ссылке канала и подпишитесь, чтобы продолжить.",
+        )
+    except asyncio.CancelledError:
+        pass
+    finally:
+        watch_tasks.pop(key, None)
+
+
+def start_chat_watch_if_needed(bot: Bot, chat_id: int, uid: int):
+    key = ("chat", uid)
+    old = watch_tasks.get(key)
+    if old and not old.done():
+        return
+    watch_tasks[key] = asyncio.create_task(run_chat_subscription_watch(bot, chat_id, uid))
 
 
 JSON_FORMAT_EXAMPLE = """[
@@ -388,7 +506,6 @@ def add_questions_with_scope(uid: int, items: list, scope: str = "personal"):
         if target_scope == "personal" and added >= allowed:
             skipped_limit += 1
             continue
-
         h = qhash(q)
         if target_scope == "global":
             try:
@@ -424,12 +541,9 @@ def add_questions_with_scope(uid: int, items: list, scope: str = "personal"):
                 dup += 1
 
     db.commit()
-    return {
-        "added": added,
-        "dup": dup,
-        "skipped_limit": skipped_limit,
-        "scope": target_scope,
-    }
+    return {"added": added, "dup": dup, "skipped_limit": skipped_limit, "scope": target_scope}
+
+
 def create_draft(uid: int, question: str, options: list[str], scope: str = "personal") -> str:
     draft_id = hashlib.sha1(f"{uid}:{time.time_ns()}:{random.random()}".encode()).hexdigest()[:12]
     db.execute(
@@ -448,6 +562,8 @@ def apply_leitner_answer(uid: int, qid: int, is_ok: bool):
     old_box = q["box"] or 0
     new_box = min(old_box + 1, 5) if is_ok else 0
     next_due = now_ts + LEITNER_INTERVALS[new_box]
+    delta = SCORE_CORRECT if is_ok else SCORE_WRONG
+    new_score = apply_score_delta(uid, delta)
 
     db.execute(
         "UPDATE questions SET box=?, attempts=attempts+1, correct_count=correct_count+?, "
@@ -456,21 +572,19 @@ def apply_leitner_answer(uid: int, qid: int, is_ok: bool):
     )
     db.commit()
     touch_streak(uid)
-    return {"old_box": old_box, "new_box": new_box, "next_due": next_due}
+    return {"old_box": old_box, "new_box": new_box, "next_due": next_due, "delta": delta, "score": new_score}
 
 
 def pick_question(uid: int, mode: str = "due", exclude_ids=None):
     exclude_ids = exclude_ids or []
     placeholders = ",".join("?" * len(exclude_ids)) if exclude_ids else "0"
     now_ts = int(time.time())
-
     if mode == "wrong":
         query = (
             f"SELECT * FROM questions WHERE user_id=? AND seen=1 AND last_ok=0 "
             f"AND id NOT IN ({placeholders}) ORDER BY last_ts ASC, RANDOM() LIMIT 1"
         )
         return db.execute(query, (uid, *exclude_ids)).fetchone()
-
     query = (
         f"SELECT * FROM questions WHERE user_id=? AND due<=? "
         f"AND id NOT IN ({placeholders}) ORDER BY box ASC, seen ASC, RANDOM() LIMIT 1"
@@ -478,31 +592,22 @@ def pick_question(uid: int, mode: str = "due", exclude_ids=None):
     return db.execute(query, (uid, now_ts, *exclude_ids)).fetchone()
 
 
-def compute_user_score(uid: int) -> int:
-    agg = db.execute(
-        "SELECT COALESCE(SUM(correct_count),0) cor, COALESCE(SUM(box),0) box_sum FROM questions WHERE user_id=?",
-        (uid,),
-    ).fetchone()
-    return int(agg["cor"]) * 10 + int(agg["box_sum"]) * 5 + streak_now(uid) * 15
-
-
 def build_leaderboard(limit: int = 20) -> list[dict]:
-    users = db.execute("SELECT user_id, full_name, username FROM users").fetchall()
+    users = db.execute("SELECT user_id, full_name, username, score FROM users").fetchall()
     board = []
     for u in users:
         uid = u["user_id"]
         agg = db.execute(
-            "SELECT COALESCE(SUM(attempts),0) att, COALESCE(SUM(correct_count),0) cor, COALESCE(SUM(box),0) box_sum "
+            "SELECT COALESCE(SUM(attempts),0) att, COALESCE(SUM(correct_count),0) cor "
             "FROM questions WHERE user_id=?",
             (uid,),
         ).fetchone()
         acc = round((agg["cor"] / agg["att"]) * 100) if agg["att"] > 0 else 0
-        score = int(agg["cor"]) * 10 + int(agg["box_sum"]) * 5 + streak_now(uid) * 15
         board.append({
             "user_id": uid,
             "name": u["full_name"] or f"Пользователь {uid}",
             "username": u["username"] or "",
-            "score": score,
+            "score": int(u["score"] or 0),
             "correct": int(agg["cor"]),
             "accuracy": acc,
             "streak": streak_now(uid),
@@ -523,25 +628,21 @@ def build_admin_users_list() -> list[dict]:
             "SELECT COUNT(*) c FROM questions WHERE user_id=? AND scope='personal'", (uid,)
         ).fetchone()["c"]
         agg = db.execute(
-            "SELECT COALESCE(SUM(attempts),0) att, COALESCE(SUM(correct_count),0) cor, COALESCE(SUM(box),0) box_sum "
+            "SELECT COALESCE(SUM(attempts),0) att, COALESCE(SUM(correct_count),0) cor "
             "FROM questions WHERE user_id=?",
             (uid,),
         ).fetchone()
         boxes = {str(i): 0 for i in range(6)}
-        for r in db.execute(
-            "SELECT box, COUNT(*) c FROM questions WHERE user_id=? GROUP BY box", (uid,)
-        ).fetchall():
+        for r in db.execute("SELECT box, COUNT(*) c FROM questions WHERE user_id=? GROUP BY box", (uid,)).fetchall():
             boxes[str(r["box"])] = r["c"]
-
         acc = round((agg["cor"] / agg["att"]) * 100) if agg["att"] > 0 else 0
-        score = int(agg["cor"]) * 10 + int(agg["box_sum"]) * 5 + streak_now(uid) * 15
         result.append({
             "user_id": uid,
             "name": u["full_name"] or f"Пользователь {uid}",
             "username": u["username"] or "",
             "streak": streak_now(uid),
             "accuracy": acc,
-            "score": score,
+            "score": int(u["score"] or 0),
             "total_questions": total_q,
             "own_questions": own_q,
             "personal_limit": personal_limit(uid),
@@ -557,6 +658,12 @@ def get_referral_link(bot_username: str | None, uid: int) -> str:
     return f"https://t.me/{uname}?start=ref_{uid}"
 
 
+def get_share_url(bot_username: str | None, uid: int) -> str:
+    link = get_referral_link(bot_username, uid)
+    text = f"Присоединяйся к тренажёру по методу Лейтнера и Эббингауза! +50 тестов по ссылке: {link}"
+    return f"https://t.me/share/url?url={quote(link)}&text={quote(text)}"
+
+
 BTN_WORK = "📝 Пройти тест"
 BTN_WRONG = "❌ Работа над ошибками"
 BTN_ADD = "➕ Добавить тест"
@@ -569,14 +676,20 @@ def get_menu():
         [KeyboardButton(text=BTN_ADD), KeyboardButton(text=BTN_STATS)],
     ]
     if WEBAPP_URL:
-        rows.insert(
-            0,
-            [KeyboardButton(text="🚀 Открыть Mini App", web_app=WebAppInfo(url=WEBAPP_URL))],
-        )
+        rows.insert(0, [KeyboardButton(text="🚀 Открыть Mini App", web_app=WebAppInfo(url=WEBAPP_URL))])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
-
-
 router = Router()
+
+
+async def prompt_subscribe_chat(bot: Bot, chat_id: int, uid: int, missing: list[dict]):
+    await bot.send_message(
+        chat_id,
+        "🔒 <b>Для доступа подпишитесь на обязательный канал.</b>\n"
+        f"Нажмите на ссылку ниже — бот начнёт проверять подписку каждую секунду (в течение {SUB_WATCH_SECONDS} сек.):",
+        reply_markup=build_subscribe_keyboard(missing),
+        parse_mode="HTML",
+    )
+    start_chat_watch_if_needed(bot, chat_id, uid)
 
 
 async def send_question_msg(bot, chat_id, uid, q):
@@ -611,7 +724,8 @@ async def send_next(bot, chat_id, uid):
         pct = round(s["ok"] / s["total"] * 100) if s["total"] else 0
         return await bot.send_message(
             chat_id,
-            f"🏁 Сессия завершена: <b>{s['ok']}/{s['total']}</b> ({pct}%)\n🔥 Серия дней: <b>{streak_now(uid)} дн.</b>",
+            f"🏁 Сессия завершена: <b>{s['ok']}/{s['total']}</b> ({pct}%)\n"
+            f"⭐ Очки: <b>{get_user_score(uid)}</b> • 🔥 Серия: <b>{streak_now(uid)} дн.</b>",
             parse_mode="HTML",
         )
 
@@ -632,12 +746,16 @@ async def send_next(bot, chat_id, uid):
 
 
 async def start_session(bot, chat_id, uid, mode):
+    ok_sub, missing = await check_user_subscriptions(bot, uid)
+    if not ok_sub:
+        return await prompt_subscribe_chat(bot, chat_id, uid, missing)
+
     ensure_user(uid)
     started = int(time.time())
     if mode == "manual":
         n = DAILY_LIMIT - day_count(uid)
         if n <= 0:
-            return await bot.send_message(chat_id, f"Дневной лимит {DAILY_LIMIT} вопросов исчерпан. Возвращайтесь завтра!")
+            return await bot.send_message(chat_id, f"Дневной лимит {DAILY_LIMIT} вопросов исчерпан.")
     elif mode == "wrong":
         n = db.execute(
             "SELECT COUNT(*) c FROM questions WHERE user_id=? AND seen=1 AND last_ok=0", (uid,)
@@ -648,7 +766,7 @@ async def start_session(bot, chat_id, uid, mode):
         n = AUTO_COUNT
 
     if not pick_question(uid, mode):
-        return await bot.send_message(chat_id, "Пока нет вопросов, которым пора вернуться по расписанию повторений.")
+        return await bot.send_message(chat_id, "Пока нет вопросов для повторения.")
 
     db.execute(
         "INSERT OR REPLACE INTO sessions(user_id,current_q_id,remaining,total,ok,mode,started) VALUES(?,0,?,0,0,?,?)",
@@ -662,16 +780,11 @@ async def start_session(bot, chat_id, uid, mode):
 async def cmd_start(m: Message, bot: Bot):
     uid = m.from_user.id
     args = (m.text or "").split(maxsplit=1)
-    ref_by = None
-    if len(args) > 1 and args[1].startswith("ref_"):
-        raw_ref = args[1][4:]
-        if raw_ref.isdigit():
-            ref_by = int(raw_ref)
+    ref_by = int(args[1][4:]) if len(args) > 1 and args[1].startswith("ref_") and args[1][4:].isdigit() else None
 
     is_new = ensure_user(uid, m.from_user.full_name or "", m.from_user.username or "", ref_by)
     if is_new and ref_by and ref_by != uid:
-        ref_row = db.execute("SELECT user_id FROM users WHERE user_id=?", (ref_by,)).fetchone()
-        if ref_row:
+        if db.execute("SELECT user_id FROM users WHERE user_id=?", (ref_by,)).fetchone():
             try:
                 await bot.send_message(
                     ref_by,
@@ -682,53 +795,60 @@ async def cmd_start(m: Message, bot: Bot):
             except Exception:
                 pass
 
+    ok_sub, missing = await check_user_subscriptions(bot, uid)
+    if not ok_sub:
+        return await prompt_subscribe_chat(bot, m.chat.id, uid, missing)
+
     inline = None
     if WEBAPP_URL:
         inline = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="✨ Открыть Mini App", web_app=WebAppInfo(url=WEBAPP_URL))]
-            ]
+            inline_keyboard=[[InlineKeyboardButton(text="✨ Открыть Mini App", web_app=WebAppInfo(url=WEBAPP_URL))]]
         )
     role_note = "\n👑 <b>Режим администратора активирован.</b>" if is_admin(uid) else ""
     await m.answer(
         f"Привет, <b>{m.from_user.first_name}</b>! 👋\n\n"
-        "Этот бот помогает запоминать материал по методу <b>кривой забывания Эббингауза</b> и <b>системы Лейтнера</b>.\n"
-        "Работают личные тесты и общие тесты администратора как в чате, так и в Mini App."
+        "Тренажёр по кривой Эббингауза и системе Лейтнера.\n"
+        "• Верный ответ: <b>+10 очков</b>\n"
+        "• Ошибка: <b>-5 очков</b>"
         f"{role_note}",
         reply_markup=get_menu(),
         parse_mode="HTML",
     )
     if inline:
-        await m.answer("Быстрый запуск приложения:", reply_markup=inline)
+        await m.answer("Открыть мини-приложение:", reply_markup=inline)
 
 
 @router.message(F.text == BTN_ADD)
 async def btn_add(m: Message, bot: Bot):
     uid = m.from_user.id
+    ok_sub, missing = await check_user_subscriptions(bot, uid)
+    if not ok_sub:
+        return await prompt_subscribe_chat(bot, m.chat.id, uid, missing)
+
     ensure_user(uid, m.from_user.full_name or "", m.from_user.username or "")
     me = await bot.get_me()
     ref_link = get_referral_link(me.username, uid)
+    share_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="📤 Отправить друзьям", url=get_share_url(me.username, uid))]]
+    )
 
     if is_admin(uid):
-        await m.answer(
+        return await m.answer(
             "📥 <b>Добавление тестов (Администратор):</b>\n\n"
-            "• Отправьте <b>.json файл</b> или <b>JSON-текст</b> — добавятся в ваши тесты.\n"
-            "• Или отправьте <b>простой текст</b> (1-я строка — вопрос, далее варианты с новой строки) — выберите правильный вариант нажатием.\n"
-            "• Для выбора <b>«Для себя»</b> или <b>«Для всех»</b> откройте Mini App (вкладка «Добавить» или «Профиль»).\n\n"
+            "• Отправьте <b>.json файл</b> или <b>JSON-текст</b>.\n"
+            "• Или отправьте <b>простой текст</b> (1-я строка — вопрос, далее варианты с новой строки).\n"
             f"<b>Формат JSON:</b>\n<pre>{JSON_FORMAT_EXAMPLE}</pre>",
             parse_mode="HTML",
         )
-        return
 
-    used = personal_count(uid)
-    lim = personal_limit(uid)
     await m.answer(
-        f"📥 <b>Добавление личных тестов:</b>\n"
-        f"Использовано: <b>{used}/{lim}</b> (базовый лимит {BASE_PERSONAL_LIMIT}, +{REFERRAL_BONUS_LIMIT} за каждого приглашённого друга).\n\n"
-        "1. <b>Простым текстом:</b> 1-я строка — вопрос, со 2-й строки каждый вариант с Enter. Нажмите на верный вариант в квизе.\n"
+        f"📥 <b>Личные тесты:</b> <b>{personal_count(uid)}/{personal_limit(uid)}</b> "
+        f"(база {BASE_PERSONAL_LIMIT}, +{REFERRAL_BONUS_LIMIT} за друга)\n\n"
+        "1. <b>Простым текстом:</b> 1-я строка — вопрос, далее каждый вариант с Enter.\n"
         "2. <b>Файлом .json</b> или <b>JSON-текстом</b>.\n\n"
         f"<b>Формат JSON:</b>\n<pre>{JSON_FORMAT_EXAMPLE}</pre>\n\n"
-        f"🔗 Ваша реферальная ссылка (+{REFERRAL_BONUS_LIMIT} тестов за друга):\n<code>{ref_link}</code>",
+        f"🔗 Ссылка:\n<code>{ref_link}</code>",
+        reply_markup=share_kb,
         parse_mode="HTML",
     )
 
@@ -736,10 +856,14 @@ async def btn_add(m: Message, bot: Bot):
 @router.message(F.document)
 async def on_document(m: Message, bot: Bot):
     uid = m.from_user.id
+    ok_sub, missing = await check_user_subscriptions(bot, uid)
+    if not ok_sub:
+        return await prompt_subscribe_chat(bot, m.chat.id, uid, missing)
+
     ensure_user(uid, m.from_user.full_name or "", m.from_user.username or "")
     doc = m.document
     if not (doc.file_name or "").lower().endswith(".json"):
-        return await m.answer("Пожалуйста, отправьте файл с расширением <b>.json</b>.", parse_mode="HTML")
+        return await m.answer("Отправьте файл с расширением <b>.json</b>.", parse_mode="HTML")
     if doc.file_size and doc.file_size > 5 * 1024 * 1024:
         return await m.answer("Файл слишком большой (максимум 5 МБ).")
     buf = io.BytesIO()
@@ -753,20 +877,24 @@ async def on_document(m: Message, bot: Bot):
     res = add_questions_with_scope(uid, items, "personal")
     msg = (
         f"✅ Добавлено: <b>{res['added']}</b>\n"
-        f"♻️ Дубликатов пропущено: <b>{res['dup']}</b>\n"
+        f"♻️ Дубликатов: <b>{res['dup']}</b>\n"
         f"📌 Лимит: <b>{personal_count(uid)}/{personal_limit(uid)}</b>"
     )
     if res["skipped_limit"]:
         me = await bot.get_me()
-        msg += f"\n⛔ Не добавлено из-за лимита: <b>{res['skipped_limit']}</b>\nПригласите друга: <code>{get_referral_link(me.username, uid)}</code>"
+        msg += f"\n⛔ Пропущено по лимиту: <b>{res['skipped_limit']}</b>\n<code>{get_referral_link(me.username, uid)}</code>"
     if errors:
-        msg += f"\n⚠️ Ошибок разбора: <b>{len(errors)}</b>\n" + "\n".join(errors[:5])
+        msg += f"\n⚠️ Ошибок: <b>{len(errors)}</b>\n" + "\n".join(errors[:5])
     await m.answer(msg, parse_mode="HTML")
 
 
 @router.message(F.text == BTN_STATS)
 async def btn_stats(m: Message, bot: Bot):
     uid = m.from_user.id
+    ok_sub, missing = await check_user_subscriptions(bot, uid)
+    if not ok_sub:
+        return await prompt_subscribe_chat(bot, m.chat.id, uid, missing)
+
     ensure_user(uid, m.from_user.full_name or "", m.from_user.username or "")
     me = await bot.get_me()
     now_ts = int(time.time())
@@ -775,17 +903,20 @@ async def btn_stats(m: Message, bot: Bot):
     mastered = db.execute("SELECT COUNT(*) c FROM questions WHERE user_id=? AND box>=4", (uid,)).fetchone()["c"]
     u = db.execute("SELECT referral_count FROM users WHERE user_id=?", (uid,)).fetchone()
     refs = u["referral_count"] if u else 0
-
+    share_kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="📤 Отправить друзьям", url=get_share_url(me.username, uid))]]
+    )
     await m.answer(
-        f"📊 <b>Ваша статистика:</b>\n\n"
+        f"📊 <b>Статистика:</b>\n\n"
+        f"⭐ Очки: <b>{get_user_score(uid)}</b> (+10 / -5)\n"
         f"📚 Всего вопросов: <b>{total}</b>\n"
-        f"✍️ Личных тестов: <b>{personal_count(uid)}/{personal_limit(uid)}</b>\n"
-        f"⏳ Готово к повторению: <b>{due}</b>\n"
-        f"🏆 Закреплено (Ящики 4–5): <b>{mastered}</b>\n"
-        f"⭐ Рейтинговые очки: <b>{compute_user_score(uid)}</b>\n"
-        f"🔥 Серия дней: <b>{streak_now(uid)}</b>\n"
-        f"👥 Приглашено друзей: <b>{refs}</b>\n"
-        f"🔗 Реферальная ссылка:\n<code>{get_referral_link(me.username, uid)}</code>",
+        f"✍️ Личные тесты: <b>{personal_count(uid)}/{personal_limit(uid)}</b>\n"
+        f"⏳ К повторению: <b>{due}</b>\n"
+        f"🏆 Закреплено (4–5): <b>{mastered}</b>\n"
+        f"🔥 Серия: <b>{streak_now(uid)} дн.</b>\n"
+        f"👥 Друзей: <b>{refs}</b>\n"
+        f"🔗 Ссылка:\n<code>{get_referral_link(me.username, uid)}</code>",
+        reply_markup=share_kb,
         parse_mode="HTML",
     )
 
@@ -802,10 +933,14 @@ async def btn_wrong(m: Message, bot: Bot):
 
 @router.message(F.text)
 async def on_text_input(m: Message, bot: Bot):
+    uid = m.from_user.id
+    ok_sub, missing = await check_user_subscriptions(bot, uid)
+    if not ok_sub:
+        return await prompt_subscribe_chat(bot, m.chat.id, uid, missing)
+
     txt = (m.text or "").strip()
     if not txt:
         return
-    uid = m.from_user.id
     ensure_user(uid, m.from_user.full_name or "", m.from_user.username or "")
 
     if txt.startswith("[") or txt.startswith("{"):
@@ -814,16 +949,15 @@ async def on_text_input(m: Message, bot: Bot):
             items, errors = parse_items(data)
         except Exception as e:
             return await m.answer(f"❌ Некорректный JSON: {e}")
-
         res = add_questions_with_scope(uid, items, "personal")
         msg = (
             f"✅ Добавлено: <b>{res['added']}</b>\n"
-            f"♻️ Дубликатов пропущено: <b>{res['dup']}</b>\n"
+            f"♻️ Дубликатов: <b>{res['dup']}</b>\n"
             f"📌 Лимит: <b>{personal_count(uid)}/{personal_limit(uid)}</b>"
         )
         if res["skipped_limit"]:
             me = await bot.get_me()
-            msg += f"\n⛔ Пропущено из-за лимита: <b>{res['skipped_limit']}</b>\nСсылка: <code>{get_referral_link(me.username, uid)}</code>"
+            msg += f"\n⛔ Пропущено по лимиту: <b>{res['skipped_limit']}</b>\n<code>{get_referral_link(me.username, uid)}</code>"
         if errors:
             msg += f"\n⚠️ Ошибок: <b>{len(errors)}</b>\n" + "\n".join(errors[:5])
         return await m.answer(msg, parse_mode="HTML")
@@ -832,8 +966,8 @@ async def on_text_input(m: Message, bot: Bot):
         if not is_admin(uid) and personal_remaining(uid) <= 0:
             me = await bot.get_me()
             return await m.answer(
-                f"⛔ Вы достигли лимита ({personal_limit(uid)} тестов).\n"
-                f"Пригласите друга по ссылке (+{REFERRAL_BONUS_LIMIT} тестов):\n<code>{get_referral_link(me.username, uid)}</code>",
+                f"⛔ Достигнут лимит ({personal_limit(uid)} тестов).\n"
+                f"Пригласите друга (+{REFERRAL_BONUS_LIMIT} тестов):\n<code>{get_referral_link(me.username, uid)}</code>",
                 parse_mode="HTML",
             )
         try:
@@ -850,59 +984,64 @@ async def on_text_input(m: Message, bot: Bot):
         )
         return await m.answer(
             f"📝 <b>Предпросмотр теста:</b>\n❓ <b>{question}</b>\n\n"
-            "Нажмите на <b>правильный вариант ответа</b>, чтобы сохранить вопрос:",
+            "Нажмите на <b>правильный вариант ответа</b>:",
             reply_markup=kb,
             parse_mode="HTML",
         )
+@router.callback_query(F.data.startswith("sublink:"))
+async def on_sublink_click(cb: CallbackQuery, bot: Bot):
+    start_chat_watch_if_needed(bot, cb.message.chat.id, cb.from_user.id)
+    await cb.answer(f"Проверяем подписку каждую секунду ({SUB_WATCH_SECONDS} сек.)...")
+
+
 @router.callback_query(F.data.startswith("setans:"))
-async def on_set_answer(cb: CallbackQuery):
+async def on_set_answer(cb: CallbackQuery, bot: Bot):
     uid = cb.from_user.id
+    ok_sub, missing = await check_user_subscriptions(bot, uid)
+    if not ok_sub:
+        await prompt_subscribe_chat(bot, cb.message.chat.id, uid, missing)
+        return await cb.answer("Сначала подпишитесь на канал", show_alert=True)
+
     _, draft_id, idx_s = cb.data.split(":")
     idx = int(idx_s)
-
-    draft = db.execute(
-        "SELECT * FROM pending_drafts WHERE draft_id=? AND user_id=?", (draft_id, uid)
-    ).fetchone()
+    draft = db.execute("SELECT * FROM pending_drafts WHERE draft_id=? AND user_id=?", (draft_id, uid)).fetchone()
     if not draft:
-        return await cb.answer("Черновик устарел или уже сохранён", show_alert=True)
+        return await cb.answer("Черновик устарел", show_alert=True)
 
     options = json.loads(draft["options"])
     if idx < 0 or idx >= len(options):
         return await cb.answer("Неверный вариант", show_alert=True)
 
-    scope = draft["scope"] or "personal"
-    res = add_questions_with_scope(uid, [(draft["question"], options, idx)], scope)
+    res = add_questions_with_scope(uid, [(draft["question"], options, idx)], draft["scope"] or "personal")
     db.execute("DELETE FROM pending_drafts WHERE draft_id=?", (draft_id,))
     db.commit()
-
     try:
         await cb.message.delete()
     except Exception:
         pass
 
     if res["added"]:
-        await cb.answer("✅ Правильный ответ сохранён!")
+        await cb.answer("✅ Сохранено!")
         await cb.message.answer(
-            f"✅ <b>Вопрос добавлен!</b>\n\n"
-            f"❓ {draft['question']}\n"
-            f"✔️ Правильный ответ: <b>{options[idx]}</b>\n"
-            f"📦 Начальный ящик: <b>0/5</b>",
+            f"✅ <b>Вопрос добавлен!</b>\n❓ {draft['question']}\n✔️ Ответ: <b>{options[idx]}</b>",
             parse_mode="HTML",
         )
     elif res["skipped_limit"]:
-        await cb.answer("⛔ Лимит тестов исчерпан", show_alert=True)
-        await cb.message.answer("⛔ Достигнут лимит личных тестов. Пригласите друга для увеличения лимита.")
+        await cb.answer("⛔ Лимит исчерпан", show_alert=True)
     else:
         await cb.answer("♻️ Дубликат")
-        await cb.message.answer("♻️ Такой вопрос уже есть в базе.")
 
 
 @router.callback_query(F.data.startswith("a:"))
 async def on_answer(cb: CallbackQuery, bot: Bot):
     uid = cb.from_user.id
+    ok_sub, missing = await check_user_subscriptions(bot, uid)
+    if not ok_sub:
+        await prompt_subscribe_chat(bot, cb.message.chat.id, uid, missing)
+        return await cb.answer("Сначала подпишитесь на канал", show_alert=True)
+
     _, qid_s, pos_s, perm = cb.data.split(":")
     qid, pos = int(qid_s), int(pos_s)
-
     sess = db.execute("SELECT * FROM sessions WHERE user_id=?", (uid,)).fetchone()
     if sess and sess["current_q_id"] != qid:
         return await cb.answer("На этот вопрос уже дан ответ!")
@@ -935,8 +1074,8 @@ async def on_answer(cb: CallbackQuery, bot: Bot):
             bump_day(uid)
         db.commit()
 
-    box_info = f"📦 Ящик: {res['old_box']} → {res['new_box']}" if res else ""
-    await cb.answer(f"{'✅ Верно!' if ok else '❌ Ошибка!'} {box_info}")
+    pts = "+10" if ok else "-5"
+    await cb.answer(f"{'✅ Верно!' if ok else '❌ Ошибка!'} ({pts}) 📦 {res['old_box']}→{res['new_box']}")
     await send_next(bot, cb.message.chat.id, uid)
 
 
@@ -965,15 +1104,13 @@ def get_api_user(request: web.Request) -> dict | None:
     user = verify_telegram_webapp(init_data)
     if user and "id" in user:
         full_name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
-        username = user.get("username", "")
-        ensure_user(int(user["id"]), full_name, username)
+        ensure_user(int(user["id"]), full_name, user.get("username", ""))
         return user
     return None
 
 
 async def handle_index(request: web.Request):
-    html_path = os.path.join(os.path.dirname(__file__), "webapp.html")
-    return web.FileResponse(html_path)
+    return web.FileResponse(os.path.join(os.path.dirname(__file__), "webapp.html"))
 
 
 async def api_dashboard(request: web.Request):
@@ -981,15 +1118,16 @@ async def api_dashboard(request: web.Request):
     if not user:
         return web.json_response({"error": "Доступ запрещён"}, status=401)
     uid = int(user["id"])
+    bot = request.app["bot"]
+    bot_info = await bot.get_me()
+
+    sub_ok, missing_channels = await check_user_subscriptions(bot, uid)
+    all_channels = list_mandatory_channels()
     now_ts = int(time.time())
-    bot_info = await request.app["bot"].get_me()
 
     total = db.execute("SELECT COUNT(*) c FROM questions WHERE user_id=?", (uid,)).fetchone()["c"]
     due = db.execute("SELECT COUNT(*) c FROM questions WHERE user_id=? AND due<=?", (uid, now_ts)).fetchone()["c"]
-    wrong = db.execute(
-        "SELECT COUNT(*) c FROM questions WHERE user_id=? AND seen=1 AND last_ok=0", (uid,)
-    ).fetchone()["c"]
-
+    wrong = db.execute("SELECT COUNT(*) c FROM questions WHERE user_id=? AND seen=1 AND last_ok=0", (uid,)).fetchone()["c"]
     agg = db.execute(
         "SELECT COALESCE(SUM(attempts),0) att, COALESCE(SUM(correct_count),0) cor FROM questions WHERE user_id=?",
         (uid,),
@@ -997,17 +1135,19 @@ async def api_dashboard(request: web.Request):
     accuracy = round((agg["cor"] / agg["att"]) * 100) if agg["att"] > 0 else 0
 
     boxes = {str(i): 0 for i in range(6)}
-    for r in db.execute(
-        "SELECT box, COUNT(*) c FROM questions WHERE user_id=? GROUP BY box", (uid,)
-    ).fetchall():
+    for r in db.execute("SELECT box, COUNT(*) c FROM questions WHERE user_id=? GROUP BY box", (uid,)).fetchall():
         boxes[str(r["box"])] = r["c"]
 
     u_row = db.execute("SELECT referral_count FROM users WHERE user_id=?", (uid,)).fetchone()
     refs = u_row["referral_count"] if u_row else 0
-    leaderboard = build_leaderboard(20)
-    admin_users = build_admin_users_list() if is_admin(uid) else []
 
     return web.json_response({
+        "subscription": {
+            "ok": sub_ok,
+            "missing_channels": missing_channels,
+            "all_channels": all_channels,
+            "watch_seconds": SUB_WATCH_SECONDS,
+        },
         "user": {
             "id": uid,
             "name": f"{user.get('first_name', '')} {user.get('last_name', '')}".strip() or f"Пользователь {uid}",
@@ -1022,20 +1162,75 @@ async def api_dashboard(request: web.Request):
             "referral_count": refs,
             "referral_bonus": REFERRAL_BONUS_LIMIT,
             "referral_link": get_referral_link(bot_info.username, uid),
-            "score": compute_user_score(uid),
+            "share_url": get_share_url(bot_info.username, uid),
+            "score": get_user_score(uid),
         },
-        "stats": {
-            "total": total,
-            "due": due,
-            "wrong": wrong,
-            "accuracy": accuracy,
-            "attempts": agg["att"],
-            "boxes": boxes,
-        },
+        "stats": {"total": total, "due": due, "wrong": wrong, "accuracy": accuracy, "attempts": agg["att"], "boxes": boxes},
         "json_example": JSON_FORMAT_EXAMPLE,
-        "leaderboard": leaderboard,
-        "admin_users": admin_users,
+        "leaderboard": build_leaderboard(20),
+        "admin_users": build_admin_users_list() if is_admin(uid) else [],
     })
+
+
+async def api_sub_watch_start(request: web.Request):
+    user = get_api_user(request)
+    if not user:
+        return web.json_response({"error": "Доступ запрещён"}, status=401)
+    uid = int(user["id"])
+    now_ts = int(time.time())
+    webapp_watch_state[uid] = {"started_ts": now_ts, "expires_ts": now_ts + SUB_WATCH_SECONDS}
+    ok_sub, missing = await check_user_subscriptions(request.app["bot"], uid)
+    return web.json_response({
+        "ok": ok_sub,
+        "missing_channels": missing,
+        "started_ts": now_ts,
+        "expires_ts": now_ts + SUB_WATCH_SECONDS,
+    })
+
+
+async def api_check_sub(request: web.Request):
+    user = get_api_user(request)
+    if not user:
+        return web.json_response({"error": "Доступ запрещён"}, status=401)
+    uid = int(user["id"])
+    now_ts = int(time.time())
+    ok_sub, missing = await check_user_subscriptions(request.app["bot"], uid)
+    st = webapp_watch_state.get(uid)
+    timed_out = bool(not ok_sub and st and now_ts >= st["expires_ts"])
+    return web.json_response({
+        "ok": ok_sub,
+        "missing_channels": missing,
+        "timed_out": timed_out,
+        "remaining_sec": max(0, st["expires_ts"] - now_ts) if st else 0,
+    })
+
+
+async def api_channels_save(request: web.Request):
+    user = get_api_user(request)
+    if not user or not is_admin(int(user["id"])):
+        return web.json_response({"error": "Нет прав администратора"}, status=403)
+    body = await request.json()
+    ch_id = body.get("id")
+    try:
+        title, chat_ref, url = normalize_channel_input(body.get("chat_ref", ""), body.get("url", ""), body.get("title", ""))
+    except ValueError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    if ch_id:
+        db.execute("UPDATE mandatory_channels SET title=?, chat_ref=?, url=? WHERE id=?", (title, chat_ref, url, int(ch_id)))
+    else:
+        db.execute("INSERT INTO mandatory_channels(title, chat_ref, url) VALUES(?,?,?)", (title, chat_ref, url))
+    db.commit()
+    return web.json_response({"ok": True, "channels": list_mandatory_channels()})
+
+
+async def api_channels_delete(request: web.Request):
+    user = get_api_user(request)
+    if not user or not is_admin(int(user["id"])):
+        return web.json_response({"error": "Нет прав администратора"}, status=403)
+    body = await request.json()
+    db.execute("DELETE FROM mandatory_channels WHERE id=?", (int(body.get("id", 0)),))
+    db.commit()
+    return web.json_response({"ok": True, "channels": list_mandatory_channels()})
 
 
 async def api_next_question(request: web.Request):
@@ -1043,18 +1238,18 @@ async def api_next_question(request: web.Request):
     if not user:
         return web.json_response({"error": "Доступ запрещён"}, status=401)
     uid = int(user["id"])
-    mode = request.query.get("mode", "due")
-    exclude_raw = request.query.get("exclude", "")
-    exclude = [int(x) for x in exclude_raw.split(",") if x.isdigit()]
+    ok_sub, missing = await check_user_subscriptions(request.app["bot"], uid)
+    if not ok_sub:
+        return web.json_response({"error": "Требуется подписка", "sub_required": True, "missing_channels": missing}, status=403)
 
+    mode = request.query.get("mode", "due")
+    exclude = [int(x) for x in request.query.get("exclude", "").split(",") if x.isdigit()]
     q = pick_question(uid, mode, exclude)
     if not q:
         return web.json_response({"question": None})
 
-    opts = json.loads(q["options"])
-    indexed_opts = list(enumerate(opts))
+    indexed_opts = list(enumerate(json.loads(q["options"])))
     random.shuffle(indexed_opts)
-
     return web.json_response({
         "question": {
             "id": q["id"],
@@ -1071,10 +1266,13 @@ async def api_submit_answer(request: web.Request):
     if not user:
         return web.json_response({"error": "Доступ запрещён"}, status=401)
     uid = int(user["id"])
+    ok_sub, missing = await check_user_subscriptions(request.app["bot"], uid)
+    if not ok_sub:
+        return web.json_response({"error": "Требуется подписка", "sub_required": True, "missing_channels": missing}, status=403)
+
     body = await request.json()
     qid = int(body.get("question_id", 0))
     chosen_idx = int(body.get("option_idx", -1))
-
     q = db.execute("SELECT * FROM questions WHERE id=? AND user_id=?", (qid, uid)).fetchone()
     if not q:
         return web.json_response({"error": "Вопрос не найден"}, status=404)
@@ -1082,14 +1280,14 @@ async def api_submit_answer(request: web.Request):
     is_ok = chosen_idx == q["correct"]
     res = apply_leitner_answer(uid, qid, is_ok)
     bump_day(uid)
-
     return web.json_response({
         "is_ok": is_ok,
         "correct_idx": q["correct"],
         "old_box": res["old_box"],
         "new_box": res["new_box"],
+        "delta": res["delta"],
         "streak": streak_now(uid),
-        "score": compute_user_score(uid),
+        "score": res["score"],
     })
 
 
@@ -1098,22 +1296,20 @@ async def api_import_json(request: web.Request):
     if not user:
         return web.json_response({"error": "Доступ запрещён"}, status=401)
     uid = int(user["id"])
-    body = await request.json()
-    raw_text = body.get("json_text", "")
-    scope = body.get("scope", "personal")
+    ok_sub, _ = await check_user_subscriptions(request.app["bot"], uid)
+    if not ok_sub:
+        return web.json_response({"error": "Требуется подписка", "sub_required": True}, status=403)
 
+    body = await request.json()
     try:
-        data = json.loads(decode_bytes(raw_text.encode("utf-8")))
+        data = json.loads(decode_bytes((body.get("json_text", "")).encode("utf-8")))
         items, errors = parse_items(data)
     except Exception as e:
         return web.json_response({"error": str(e)}, status=400)
 
-    res = add_questions_with_scope(uid, items, scope)
+    res = add_questions_with_scope(uid, items, body.get("scope", "personal"))
     return web.json_response({
-        "added": res["added"],
-        "dup": res["dup"],
-        "skipped_limit": res["skipped_limit"],
-        "scope": res["scope"],
+        **res,
         "errors_count": len(errors),
         "errors": errors[:5],
         "own_questions": personal_count(uid),
@@ -1126,13 +1322,14 @@ async def api_add_plain(request: web.Request):
     if not user:
         return web.json_response({"error": "Доступ запрещён"}, status=401)
     uid = int(user["id"])
+    ok_sub, _ = await check_user_subscriptions(request.app["bot"], uid)
+    if not ok_sub:
+        return web.json_response({"error": "Требуется подписка", "sub_required": True}, status=403)
+
     body = await request.json()
     question = norm(body.get("question", ""))
-    raw_options = body.get("options", [])
+    options = [norm(o) for o in body.get("options", []) if norm(o)]
     correct_idx = int(body.get("correct_idx", -1))
-    scope = body.get("scope", "personal")
-
-    options = [norm(o) for o in raw_options if norm(o)]
     if not question:
         return web.json_response({"error": "Введите текст вопроса"}, status=400)
     if not 2 <= len(options) <= 6:
@@ -1142,12 +1339,9 @@ async def api_add_plain(request: web.Request):
     if not (0 <= correct_idx < len(options)):
         return web.json_response({"error": "Выберите правильный вариант ответа"}, status=400)
 
-    res = add_questions_with_scope(uid, [(question, options, correct_idx)], scope)
+    res = add_questions_with_scope(uid, [(question, options, correct_idx)], body.get("scope", "personal"))
     return web.json_response({
-        "added": res["added"],
-        "dup": res["dup"],
-        "skipped_limit": res["skipped_limit"],
-        "scope": res["scope"],
+        **res,
         "correct_text": options[correct_idx],
         "own_questions": personal_count(uid),
         "personal_limit": personal_limit(uid),
@@ -1187,6 +1381,10 @@ async def main():
     app["bot"] = bot
     app.router.add_get("/", handle_index)
     app.router.add_get("/api/dashboard", api_dashboard)
+    app.router.add_post("/api/sub-watch/start", api_sub_watch_start)
+    app.router.add_get("/api/check-sub", api_check_sub)
+    app.router.add_post("/api/channels/save", api_channels_save)
+    app.router.add_post("/api/channels/delete", api_channels_delete)
     app.router.add_get("/api/question", api_next_question)
     app.router.add_post("/api/answer", api_submit_answer)
     app.router.add_post("/api/import", api_import_json)
@@ -1194,8 +1392,7 @@ async def main():
 
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
+    await web.TCPSite(runner, "0.0.0.0", PORT).start()
     log.info("Сервер Mini App запущен на порту %s", PORT)
 
     asyncio.create_task(scheduler(bot))
