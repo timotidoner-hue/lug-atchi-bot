@@ -7,17 +7,22 @@ from urllib.parse import urlparse
 import yt_dlp
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
+BASE = Path(__file__).parent
 app = FastAPI()
-slots = threading.BoundedSemaphore(2)  # bir vaqtda ko'pi bilan 2 ta yuklash
+slots = threading.BoundedSemaphore(2)
 HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"}
 
 
 def check(url: str):
     if urlparse(url).hostname not in HOSTS:
         raise HTTPException(400, "Faqat YouTube havolalari qabul qilinadi.")
+
+
+@app.get("/")
+def index():
+    return FileResponse(BASE / "index.html")
 
 
 @app.get("/api/info")
@@ -72,6 +77,3 @@ def download(url: str, kind: str = "video", height: int = 720):
         cleanup()
         raise HTTPException(500, "Yuklab bo'lmadi. ffmpeg o'rnatilganini va yt-dlp yangiligini tekshiring.")
     return FileResponse(f, filename=f.name, background=BackgroundTask(cleanup))
-
-
-app.mount("/", StaticFiles(directory="static", html=True), name="static")
